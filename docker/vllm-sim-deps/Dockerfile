@@ -23,4 +23,10 @@ RUN find /plugins -type d -name "*.dist-info" -exec sh -c 'cd "$1" && ls | grep 
 # Create minimal final image with just the plugin
 # Use busybox to provide sh and cp for Kubernetes initContainer commands
 FROM busybox:1.36
+
+# Links the published GHCR package to the source repository, so it appears
+# under the repo's Packages tab and inherits the repo's access settings.
+LABEL org.opencontainers.image.source="https://github.com/llm-d-extensions/vllm-model-sim"
+LABEL org.opencontainers.image.description="vLLM simulated model plugin, prebuilt for Kubernetes initContainers"
+
 COPY --from=builder /plugins /plugins
