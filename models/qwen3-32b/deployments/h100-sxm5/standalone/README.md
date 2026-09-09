@@ -72,7 +72,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 > CPU-only or macOS environments. See the [vLLM CPU build guide](https://docs.vllm.ai/en/latest/getting_started/installation/cpu.html)
 > for platform-specific instructions.
 
-Once vLLM is installed, install this plugin from the `vllm-simulated-model`
+Once vLLM is installed, install this plugin from the `vllm-model-sim`
 repo root:
 
 ```bash

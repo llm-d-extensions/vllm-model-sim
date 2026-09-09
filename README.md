@@ -1,4 +1,4 @@
-# vllm-simulated-model
+# vllm-model-sim
 
 An out-of-tree vLLM plugin that runs the **full vLLM serving stack** on CPU
 (incl. macOS) without a real model, real weights, or a GPU. It returns random
@@ -185,7 +185,7 @@ See [evaluation/README.md](evaluation/README.md) for the full operator runbook, 
 
 ## Comparison with related tools
 
-| | **vllm-simulated-model** | **[BLIS](https://github.com/inference-sim/inference-sim)** | **[llm-d-inference-sim](https://github.com/llm-d/llm-d-inference-sim)** |
+| | **vllm-model-sim** | **[BLIS](https://github.com/inference-sim/inference-sim)** | **[llm-d-inference-sim](https://github.com/llm-d/llm-d-inference-sim)** |
 |---|---|---|---|
 | **What runs** | Real vLLM serving stack | Discrete-event cluster simulator (Go) | Fake HTTP server (no vLLM) |
 | **Model forward pass** | Replaced with sleep | Replaced with roofline math | Replaced with sleep + jitter |
@@ -201,17 +201,17 @@ See [evaluation/README.md](evaluation/README.md) for the full operator runbook, 
 
 All three tools remove the GPU. They differ in how much *real vLLM behavior* they preserve, and that fidelity is not free — it is the axis to decide on.
 
-- **vllm-simulated-model** runs the actual vLLM scheduler, batching, streaming, and API server; only the model forward pass is replaced with a sleep. So the emergent behavior you observe — batch composition, preemption, queueing, prefix caching, chunked prefill — is vLLM's real behavior, not a model of it. Use it when the *thing under test is vLLM itself* (or something whose correctness depends on vLLM's exact behavior).
+- **vllm-model-sim** runs the actual vLLM scheduler, batching, streaming, and API server; only the model forward pass is replaced with a sleep. So the emergent behavior you observe — batch composition, preemption, queueing, prefix caching, chunked prefill — is vLLM's real behavior, not a model of it. Use it when the *thing under test is vLLM itself* (or something whose correctness depends on vLLM's exact behavior).
 - **BLIS** reimplements the cluster (KV cache, preemption, autoscaling) as a discrete-event model. It is faster and can explore hardware you don't own, but it cannot reproduce a vLLM-specific behavior or regression, because no vLLM code runs.
 - **llm-d-inference-sim** reproduces vLLM's API surface and metrics but no scheduling logic. It is ideal as a cheap pod stand-in.
 
-It all comes down to *which metrics have to be simulated accurately* for the experiment to be meaningful. If the metrics you care about only need realistic latency and load behavior, a lower-fidelity stand-in like llm-d-inference-sim, or a capacity model like BLIS, is usually the better fit. Reach for vllm-simulated-model when those metrics depend on vLLM's real scheduling and batching, not just on plausible-looking latency.
+It all comes down to *which metrics have to be simulated accurately* for the experiment to be meaningful. If the metrics you care about only need realistic latency and load behavior, a lower-fidelity stand-in like llm-d-inference-sim, or a capacity model like BLIS, is usually the better fit. Reach for vllm-model-sim when those metrics depend on vLLM's real scheduling and batching, not just on plausible-looking latency.
 
 ### Maintenance
 
 Because this is an out-of-tree vLLM plugin rather than a reimplementation, it inherits vLLM's behavior for free and stays correct as vLLM evolves. When vLLM changes its scheduler, batching, or API, the simulation reflects that change automatically with no update here — the plugin only needs attention when the narrow contract it hooks into (the model-runner / forward-pass interface) changes. BLIS and llm-d-inference-sim, being separate implementations, must be actively tracked against vLLM to stay representative.
 
-vllm-simulated-model's physics latency model is adapted from BLIS's roofline math, so predictions from the two tools are comparable when given the same hardware spec.
+vllm-model-sim's physics latency model is adapted from BLIS's roofline math, so predictions from the two tools are comparable when given the same hardware spec.
 
 ## Limitations
 
@@ -225,13 +225,13 @@ vllm-simulated-model's physics latency model is adapted from BLIS's roofline mat
 
 ### Building the Dependencies Container Image
 
-The Kubernetes deployments use a pre-built container image (`ghcr.io/lionelvillard/vllm-sim-deps`) that bundles the plugin and NIXL dependencies. This speeds up pod startup significantly.
+The Kubernetes deployments use a pre-built container image (`ghcr.io/llm-d-extensions/vllm-sim-deps`) that bundles the plugin and NIXL dependencies. This speeds up pod startup significantly.
 
 **Build and push (maintainers only):**
 
 ```bash
 # Authenticate with GitHub Container Registry
-echo $GITHUB_TOKEN | docker login ghcr.io -u lionelvillard --password-stdin
+echo $GITHUB_TOKEN | docker login ghcr.io -u USERNAME --password-stdin
 
 # Build and push from repo root
 ./docker/vllm-sim-deps/build.sh v0.3.0

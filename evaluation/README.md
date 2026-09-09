@@ -1,6 +1,6 @@
 # Sim-vs-Real Evaluation
 
-This tool measures how faithfully `vllm-simulated-model` reproduces the latency and throughput behavior of a real model on a real GPU. It runs an identical benchmark workload against two vLLM servers — the real model on an H100, and the simulated model on CPU — and reports the per-metric error (MAPE) between them.
+This tool measures how faithfully `vllm-model-sim` reproduces the latency and throughput behavior of a real model on a real GPU. It runs an identical benchmark workload against two vLLM servers — the real model on an H100, and the simulated model on CPU — and reports the per-metric error (MAPE) between them.
 
 For design details and rationale, see [../docs/2026-08-19-sim-vs-real-evaluation-design.md](../docs/2026-08-19-sim-vs-real-evaluation-design.md).
 

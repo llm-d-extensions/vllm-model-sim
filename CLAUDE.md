@@ -16,12 +16,14 @@ does **not** point at the checkout — resolve it from the main repo root instea
 
 ## GitHub repository organization
 
-This repository is hosted under the **lionelvillard** GitHub organization:
-`https://github.com/lionelvillard/vllm-simulated-model`
+This repository is hosted under the **llm-d-extensions** GitHub organization:
+`https://github.com/llm-d-extensions/vllm-model-sim`
 
-The local file path (`vllm-project/vllm-simulated-model`) does **not** reflect
-the GitHub organization. Always use `lionelvillard` when referencing GitHub URLs,
-container registry paths, or archive URLs in Dockerfiles and documentation.
+The local file path (`vllm-project/vllm-simulated-model`) reflects neither the
+GitHub organization nor the repository name — it is a stale checkout directory.
+Always use `llm-d-extensions/vllm-model-sim` when referencing GitHub URLs,
+container registry paths (`ghcr.io/llm-d-extensions/...`), or archive URLs in
+Dockerfiles and documentation.
 
 ## Running tests
 

@@ -5,7 +5,7 @@ image and vLLM versions for the Qwen3-32B P/D deployment.
 
 ## Current Version
 
-**Init container image:** `ghcr.io/lionelvillard/vllm-sim-deps:v0.3.0`
+**Init container image:** `ghcr.io/llm-d-extensions/vllm-sim-deps:v0.3.0`
 
 ## Compatibility Matrix
 
@@ -19,7 +19,7 @@ image and vLLM versions for the Qwen3-32B P/D deployment.
 
 Each init container image version bundles:
 
-1. **vllm-simulated-model plugin** — provides the simulated latency model
+1. **vllm-model-sim plugin** — provides the simulated latency model
 
 > [!NOTE]
 > NIXL is no longer included in v0.2.0+. The llm-d-cpu base image provides NIXL pre-installed.
@@ -30,13 +30,13 @@ Build and push the dependencies image from the repo root:
 
 ```bash
 # Authenticate with GitHub Container Registry
-echo $GITHUB_TOKEN | docker login ghcr.io -u lionelvillard --password-stdin
+echo $GITHUB_TOKEN | docker login ghcr.io -u USERNAME --password-stdin
 
 # Build and push
 ./docker/vllm-sim-deps/build.sh v0.3.0
 ```
 
-The image is published to `ghcr.io/lionelvillard/vllm-sim-deps`.
+The image is published to `ghcr.io/llm-d-extensions/vllm-sim-deps`.
 
 See [docker/vllm-sim-deps/README.md](../../../../../docker/vllm-sim-deps/README.md) for build details.
 

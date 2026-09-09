@@ -18,7 +18,7 @@ calibration source for `k8s/`.
 
 ### Pre-built Dependencies Image
 
-The deployment uses a pre-built container image (`ghcr.io/lionelvillard/vllm-sim-deps:v0.3.0`)
+The deployment uses a pre-built container image (`ghcr.io/llm-d-extensions/vllm-sim-deps:v0.3.0`)
 that bundles the simulated model plugin and NIXL dependencies. This significantly
 speeds up pod startup compared to installing dependencies via pip at runtime.
 
@@ -57,7 +57,7 @@ Both backends run the sim plugin (`vllm/vllm-openai-cpu` image, `--load-format
 dummy`) and mount the physics ConfigMap at `/model`. The `6-char` hash `eae748`
 is the SHA of the (physics) latency config, matching the ConfigMap and the
 `vllm-qwen3-32b-pd-<hash>[-<role>]` naming scheme. Both deployments include an
-init container (`ghcr.io/lionelvillard/vllm-sim-deps:v0.3.0`) that provides
+init container (`ghcr.io/llm-d-extensions/vllm-sim-deps:v0.3.0`) that provides
 pre-built dependencies: the simulated model plugin and NIXL 1.3.2 for KV cache
 transfer via `NixlConnector`.
 
@@ -144,7 +144,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 > CPU-only or macOS environments. See the [vLLM CPU build guide](https://docs.vllm.ai/en/latest/getting_started/installation/cpu.html)
 > for platform-specific instructions.
 
-Once vLLM is installed, install this plugin from the `vllm-simulated-model`
+Once vLLM is installed, install this plugin from the `vllm-model-sim`
 repo root:
 
 ```bash

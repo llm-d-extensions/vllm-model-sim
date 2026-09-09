@@ -11,7 +11,7 @@
 set -euo pipefail
 
 VERSION="${1:-v0.1.0}"
-REGISTRY="ghcr.io/lionelvillard"
+REGISTRY="ghcr.io/llm-d-extensions"
 IMAGE_NAME="vllm-sim-deps"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"

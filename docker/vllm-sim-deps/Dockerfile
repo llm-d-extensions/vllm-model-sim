@@ -2,9 +2,9 @@
 # NIXL is no longer included - use llm-d-cpu base image which has NIXL pre-installed
 #
 # Build from repo root:
-#   docker build -f docker/vllm-sim-deps/Dockerfile -t ghcr.io/lionelvillard/vllm-sim-deps:v0.3.0 .
+#   docker build -f docker/vllm-sim-deps/Dockerfile -t ghcr.io/llm-d-extensions/vllm-sim-deps:v0.3.0 .
 # Push:
-#   docker push ghcr.io/lionelvillard/vllm-sim-deps:v0.3.0
+#   docker push ghcr.io/llm-d-extensions/vllm-sim-deps:v0.3.0
 
 FROM python:3.12-slim AS builder
 

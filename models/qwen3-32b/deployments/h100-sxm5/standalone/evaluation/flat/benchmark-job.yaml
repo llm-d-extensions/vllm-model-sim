@@ -22,11 +22,11 @@ spec:
           set -euo pipefail
           mkdir -p /tmp/src /tmp/pydeps
           python -c "import urllib.request, tarfile; \
-            urllib.request.urlretrieve('https://github.com/lionelvillard/vllm-simulated-model/archive/refs/heads/main.tar.gz', '/tmp/src.tgz'); \
+            urllib.request.urlretrieve('https://github.com/llm-d-extensions/vllm-model-sim/archive/refs/heads/main.tar.gz', '/tmp/src.tgz'); \
             tarfile.open('/tmp/src.tgz').extractall('/tmp/src')"
           pip install --no-cache-dir --target=/tmp/pydeps pyyaml
-          export PYTHONPATH="/tmp/src/vllm-simulated-model-main:/tmp/pydeps"
-          cd /tmp/src/vllm-simulated-model-main
+          export PYTHONPATH="/tmp/src/vllm-model-sim-main:/tmp/pydeps"
+          cd /tmp/src/vllm-model-sim-main
           python -m evaluation.run_eval \
             --real-url http://vllm-qwen3-32b-standalone-dcd098-real:8000 \
             --sim-url http://vllm-qwen3-32b-standalone-dcd098-sim:8000 \

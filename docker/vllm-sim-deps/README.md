@@ -6,7 +6,7 @@ up Kubernetes pod startup.
 ## Contents
 
 The image packages:
-- **vllm-simulated-model plugin** — provides simulated latency models
+- **vllm-model-sim plugin** — provides simulated latency models
 
 > [!NOTE]
 > NIXL is no longer included in this image. Use `ghcr.io/llm-d/llm-d-cpu` base
@@ -17,7 +17,7 @@ The image packages:
 **Prerequisites:**
 ```bash
 # Authenticate with GitHub Container Registry
-echo $GITHUB_TOKEN | docker login ghcr.io -u lionelvillard --password-stdin
+echo $GITHUB_TOKEN | docker login ghcr.io -u USERNAME --password-stdin
 ```
 
 **Build and push:**
@@ -26,7 +26,7 @@ echo $GITHUB_TOKEN | docker login ghcr.io -u lionelvillard --password-stdin
 ./docker/vllm-sim-deps/build.sh v0.3.0
 ```
 
-The script builds the image and pushes it to `ghcr.io/lionelvillard/vllm-sim-deps:v0.3.0`.
+The script builds the image and pushes it to `ghcr.io/llm-d-extensions/vllm-sim-deps:v0.3.0`.
 
 ## Version Compatibility
 
@@ -59,8 +59,8 @@ Dockerfile modification needed — it always installs from the local source):
 
 ```bash
 # From repo root
-docker build -f docker/vllm-sim-deps/Dockerfile -t ghcr.io/lionelvillard/vllm-sim-deps:dev .
-docker push ghcr.io/lionelvillard/vllm-sim-deps:dev
+docker build -f docker/vllm-sim-deps/Dockerfile -t ghcr.io/llm-d-extensions/vllm-sim-deps:dev .
+docker push ghcr.io/llm-d-extensions/vllm-sim-deps:dev
 ```
 
 > [!WARNING]

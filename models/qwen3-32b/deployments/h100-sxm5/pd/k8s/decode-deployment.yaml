@@ -19,7 +19,7 @@ spec:
       initContainers:
       # Copy simulated model plugin from deps image
       - name: install-plugin
-        image: ghcr.io/lionelvillard/vllm-sim-deps:v0.3.0
+        image: ghcr.io/llm-d-extensions/vllm-sim-deps:v0.3.0
         imagePullPolicy: Always
         command:
         - sh
