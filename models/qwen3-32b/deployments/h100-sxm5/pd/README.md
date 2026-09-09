@@ -10,6 +10,14 @@ KV-transfer path without any H100s. The `evaluation/` directory contains
 latency-model variants and benchmark reports; the `physics` variant is the
 calibration source for `k8s/`.
 
+> [!IMPORTANT]
+> `k8s/configmap.yaml` was updated to a re-tuned beta,
+> β = [3.119229, 1.182904, 0.146612] (from `eval.sh tune`, see
+> [evaluation/results/physics](evaluation/results/physics/)), but
+> `evaluation/physics/sim-config.json` still has the pre-tuning beta,
+> β = [0.152128, 0.0, 126.024825]. Re-run the eval against the promoted beta
+> to refresh `evaluation/physics/sim-config.json` and its report.
+
 > [!NOTE]
 > The simulated P/D stack (CPU + `NixlConnector` + dummy weights) has not yet
 > been validated against a live cluster; treat it as a starting point.
@@ -234,6 +242,7 @@ Each latency directory contains:
 | Directory | Latency model used | Notes |
 |-----------|--------------------|-------|
 | [results/flat](results/flat/) | flat | — |
+| [results/physics](results/physics/) | physics | Pre-tuning report; includes the `eval.sh tune` run that produced the promoted beta now in `k8s/configmap.yaml` |
 | [results/physics-beta-1.0](results/physics-beta-1.0/) | physics-beta-1.0 | — |
 
 ## Eval (real vs sim comparison)
