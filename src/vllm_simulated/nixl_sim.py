@@ -34,17 +34,24 @@ logger = init_logger(__name__)
 class SimulatedNixlConnectorMetadata(KVConnectorMetadata):
     """Metadata for simulated NIXL connector.
 
-    Carries the list of requests and their token counts that need to be
-    fake-loaded on the consumer side.
+    Carries the requests and their token counts that need to be fake-loaded
+    on the consumer side, and those whose KV the producer side is holding
+    for a simulated send.
     """
 
-    def __init__(self, reqs_to_load: list[tuple[str, int]]):
+    def __init__(
+        self,
+        reqs_to_load: list[tuple[str, int]],
+        reqs_to_send: list[tuple[str, int]] | None = None,
+    ):
         """Initialize metadata.
 
         Args:
             reqs_to_load: List of (request_id, num_tokens) tuples to load.
+            reqs_to_send: List of (request_id, num_tokens) tuples to send.
         """
         self.reqs_to_load = reqs_to_load
+        self.reqs_to_send = list(reqs_to_send) if reqs_to_send else []
 
 
 class SimulatedNixlConnector(KVConnectorBase_V1):
@@ -74,7 +81,7 @@ class SimulatedNixlConnector(KVConnectorBase_V1):
 
         # Scheduler-side state
         self._pending_recv: dict[str, tuple["Request", int]] = {}  # req_id -> (req, num_tokens)
-        self._pending_send: dict[str, float] = {}  # req_id -> deadline (monotonic time)
+        self._pending_send: dict[str, int] = {}  # req_id -> num_tokens
 
         # Worker-side state
         self._load_deadlines: dict[str, float] = {}  # req_id -> deadline (monotonic time)
@@ -131,6 +138,12 @@ class SimulatedNixlConnector(KVConnectorBase_V1):
                 transfer_ms,
                 deadline,
             )
+
+        # Producer side: hold each sent request's blocks until its simulated
+        # transfer finishes; get_finished then reports it in done_sending.
+        for req_id, num_tokens in metadata.reqs_to_send:
+            transfer_ms = self._latency_model.transfer_time_ms(num_tokens)
+            self._send_deadlines[req_id] = now + transfer_ms / 1000.0
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """Wait for layer load (no-op for simulated connector).
@@ -285,23 +298,27 @@ class SimulatedNixlConnector(KVConnectorBase_V1):
     ) -> KVConnectorMetadata:
         """Build connector metadata for this step.
 
-        Drains the pending_recv map and packages it into metadata for the
-        worker to process.
+        Drains the pending_recv and pending_send maps and packages them into
+        metadata for the worker to process. The worker connector is a
+        separate instance (in another process), so this metadata is the only
+        way scheduler-side state reaches it.
 
         Args:
             scheduler_output: Scheduler output.
 
         Returns:
-            SimulatedNixlConnectorMetadata with requests to load.
+            SimulatedNixlConnectorMetadata with requests to load and send.
         """
         reqs_to_load = []
         for req_id, (req, num_tokens) in self._pending_recv.items():
             reqs_to_load.append((req_id, num_tokens))
+        reqs_to_send = list(self._pending_send.items())
 
-        # Clear pending recv after packaging
+        # Clear pending recv/send after packaging
         self._pending_recv.clear()
+        self._pending_send.clear()
 
-        return SimulatedNixlConnectorMetadata(reqs_to_load)
+        return SimulatedNixlConnectorMetadata(reqs_to_load, reqs_to_send)
 
     def request_finished(
         self,
@@ -341,10 +358,10 @@ class SimulatedNixlConnector(KVConnectorBase_V1):
         num_tokens = request.num_computed_tokens
         transfer_ms = self._latency_model.transfer_time_ms(num_tokens)
         deadline = time.monotonic() + transfer_ms / 1000.0
-        self._pending_send[request.request_id] = deadline
-
-        # Also set worker-side deadline for get_finished
-        self._send_deadlines[request.request_id] = deadline
+        # Handed to the worker connector (a separate instance) in the next
+        # build_connector_meta; the worker sets the deadline get_finished
+        # checks, so done_sending is reported and the blocks are freed.
+        self._pending_send[request.request_id] = num_tokens
 
         logger.debug(
             "SimulatedNixlConnector: request_finished req=%s, tokens=%d, "

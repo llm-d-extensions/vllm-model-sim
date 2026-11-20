@@ -323,3 +323,81 @@ class TestSimulatedNixlConnector:
         assert ("req-2", 200) in metadata.reqs_to_load
         # Should be cleared
         assert len(connector._pending_recv) == 0
+
+    def test_producer_send_is_reported_by_a_separate_worker_instance(
+        self, mock_producer_config, mock_kv_cache_config
+    ):
+        """vLLM runs the scheduler-role and worker-role connectors as separate
+        instances (EngineCore and Worker processes). A send recorded by the
+        scheduler's request_finished must reach the worker through the
+        connector metadata; otherwise done_sending is never reported and the
+        producer's KV blocks are never freed."""
+        scheduler = SimulatedNixlConnector(
+            mock_producer_config,
+            KVConnectorRole.SCHEDULER,
+            mock_kv_cache_config,
+        )
+        worker = SimulatedNixlConnector(
+            mock_producer_config,
+            KVConnectorRole.WORKER,
+            mock_kv_cache_config,
+        )
+
+        request = MagicMock()
+        request.request_id = "req-1"
+        request.num_computed_tokens = 100
+        request.kv_transfer_params = {}
+        delay, _ = scheduler.request_finished(request, [1, 2, 3])
+        assert delay is True
+
+        worker.bind_connector_metadata(scheduler.build_connector_meta(MagicMock()))
+        worker.start_load_kv(MagicMock())
+
+        done_sending = None
+        give_up = time.monotonic() + 1.0
+        while time.monotonic() < give_up:
+            done_sending, _ = worker.get_finished(set())
+            if done_sending:
+                break
+            time.sleep(0.005)
+        assert done_sending == {"req-1"}
+
+    def test_build_connector_meta_drains_pending_send(
+        self, mock_producer_config, mock_kv_cache_config
+    ):
+        """build_connector_meta should pass each finished producer request to
+        the worker once, with its token count."""
+        scheduler = SimulatedNixlConnector(
+            mock_producer_config,
+            KVConnectorRole.SCHEDULER,
+            mock_kv_cache_config,
+        )
+        request = MagicMock()
+        request.request_id = "req-1"
+        request.num_computed_tokens = 100
+        request.kv_transfer_params = {}
+        scheduler.request_finished(request, [1, 2, 3])
+
+        metadata = scheduler.build_connector_meta(MagicMock())
+
+        assert metadata.reqs_to_send == [("req-1", 100)]
+        assert scheduler.build_connector_meta(MagicMock()).reqs_to_send == []
+
+    def test_worker_get_finished_does_not_report_send_before_deadline(
+        self, mock_producer_config, mock_kv_cache_config
+    ):
+        """A send is not reported before its simulated transfer time."""
+        worker = SimulatedNixlConnector(
+            mock_producer_config,
+            KVConnectorRole.WORKER,
+            mock_kv_cache_config,
+        )
+        worker.bind_connector_metadata(
+            SimulatedNixlConnectorMetadata([], reqs_to_send=[("req-1", 10**9)])
+        )
+        worker.start_load_kv(MagicMock())
+
+        done_sending, _ = worker.get_finished(set())
+
+        assert not done_sending
+        assert "req-1" in worker._send_deadlines
