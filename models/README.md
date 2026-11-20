@@ -84,6 +84,12 @@ The deployment directory is named after the hardware only (no TP suffix — tens
 
 ## Adding a New Model
 
+> [!TIP]
+> In Claude Code, the `add-model` skill (`.claude/skills/add-model/`) scaffolds
+> a new model with untuned physics defaults (β = [1.0, 1.0, 0.0]) and a
+> deployable standalone `k8s/` stack, then writes the READMEs. The manual
+> steps below cover the full evaluation layout.
+
 1. Download the real config from HuggingFace:
    ```bash
    huggingface-cli download <HF-id> config.json --local-dir models/<slug>/
