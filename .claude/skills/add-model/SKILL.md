@@ -9,8 +9,10 @@ The result is a catalog entry, `catalog/models/<slug>/`, and a standalone
 stack, `deploy/<slug>-<hw>-standalone[-tp<n>]/`, whose rendered `k8s/` runs
 the **physics roofline model with unit betas** `[1.0, 1.0, 0.0]`, with no
 tuning. Unit betas are what the renderer falls back to when
-`calibrations/<slug>/<hw>.yaml` has no matching record, so nothing needs
-writing there. Prefill and decode times are the pure compute/bandwidth
+`calibrations/<slug>/<hw>.yaml` has no matching physics record, so the
+script writes no physics record there. It does write the flat (`linear`)
+debugging record, because the `flat` eval variant and
+`tests/test_simstack.py` need one for every stack. Prefill and decode times are the pure compute/bandwidth
 roofline for the model's shapes on the target GPU, with no fixed per-step
 overhead. It is a reasonable first approximation but sits below real latency,
 most visibly for small or sparse models at low batch. Calibration happens
@@ -33,9 +35,10 @@ If the user gave only a model id, use the defaults and say so. Don't stop to
 ask unless the hardware choice matters to them and is truly ambiguous.
 
 If `catalog/models/<slug>/` already exists, the request is probably a new
-hardware target or topology for an existing model. Then you only need a new
-`deploy/<stack>/stack.yaml` and `sweep.yaml`, followed by
-`python -m simstack render deploy/<stack>`; skip step 2.
+hardware target or TP for an existing model. Run the step-2 script with
+`--slug`, `--hardware` and `--tp` but without `--model`. It then reuses the
+catalog entry and writes only the stack, plus the hardware file if the GPU
+is new. Then add the stack to the model's README (step 4).
 
 ## 2. Scaffold the mechanical files
 
@@ -77,6 +80,7 @@ The script writes:
 ```
 catalog/models/<slug>/config.json   real config, cleaned
 catalog/models/<slug>/model.yaml    hf_id, served_model_name, weight_dtype
+calibrations/<slug>/<hw>.yaml       flat debugging record only (no physics record)
 deploy/<stack>/stack.yaml           model, hardware, topology: standalone, tp, profile
 deploy/<stack>/sweep.yaml           copy of evaluation/sweep.yaml
 deploy/<stack>/k8s/                 rendered: configmap.yaml, sim-config.json,
@@ -103,8 +107,10 @@ on it:
 What the script does to the real config, and why:
 - Hoists decoder fields out of `text_config` for multimodal wrappers, because
   the physics model reads attributes from the top level.
-- Maps Mixtral-style `num_local_experts` to `num_experts`, the name the
-  physics model reads.
+- Maps Mixtral/gpt-oss-style `num_local_experts` to `num_experts`. If
+  `moe_intermediate_size` is missing, it copies the per-expert width from
+  `intermediate_size`, because without it the physics model costs the MoE
+  FFN at zero (Mixtral ITL came out 10× too low).
 - Drops `quantization_config`, `auto_map` and `compression_config`. With
   dummy weights the sim can't run quantized kernels or remote code. FP8 and
   INT8 checkpoints get `weight_dtype: float8` or `int8` in `model.yaml`
@@ -114,8 +120,11 @@ The CPU pod reserves only 4 GiB of KV cache (`sim.kv_cache_space_gib` in
 `profiles/default.yaml`). If the user needs longer contexts, add a profile
 with a larger `engine.max_model_len` and KV space and name it in `stack.yaml`.
 
-Pass `--beta PF DC BASE_MS` only if the user explicitly supplies betas; it
-appends a `method: assumed` record to `calibrations/<slug>/<hw>.yaml`. The
+Pass `--beta PF DC BASE_MS` only if the user explicitly supplies betas. It
+writes a `method: assumed` physics record for the stack's
+`{topology: standalone, tp}` into `calibrations/<slug>/<hw>.yaml`, replacing
+any earlier record for the same match. Don't hand-append a second one: two
+records with the same match make `simstack check` fail for every stack. The
 point of this skill is the untuned default.
 
 ## 3. Sanity-check the default latencies
@@ -160,6 +169,9 @@ parts:
 - Keep the Eval section short: `eval.sh deploy/<stack>` and `eval.sh tune`
   will produce calibrated betas, but no report exists yet.
 
+For a new stack of an existing model, only add its row to the model's
+`catalog/models/<slug>/README.md` Stacks table and write the stack README.
+
 Then update the inventories:
 - `deploy/README.md`: add a row to the **Stacks** table, with calibration
   `none (unit betas)`.
@@ -173,6 +185,7 @@ Then update the inventories:
 ```bash
 .venv/bin/python -m simstack check                     # renders are fresh
 .venv/bin/python -m simstack resolve deploy/<stack>    # unit betas, method: assumed
+.venv/bin/python -m simstack resolve deploy/<stack> --variant flat   # the linear record
 grep -rn "qwen3-32b\|Qwen3-32B" catalog/models/<slug>/ deploy/<stack>/   # should print nothing
 source .venv/bin/activate && pytest tests/test_simstack.py   # if a venv exists
 ```
@@ -186,7 +199,9 @@ Kubernetes Deployment does by mounting the ConfigMap at `/model`:
 mkdir -p "$TMPDIR/<slug>-sim"
 cp deploy/<stack>/k8s/sim-config.json "$TMPDIR/<slug>-sim/config.json"
 vllm serve "$TMPDIR/<slug>-sim" --tokenizer <HF-id> --served-model-name <served-name> \
-  --load-format dummy --max-model-len <engine.max_model_len> --port 8000
+  --load-format dummy --max-model-len <engine.max_model_len> \
+  --max-num-batched-tokens <engine.max_num_batched_tokens> \
+  --max-num-seqs <engine.max_num_seqs> --port 8000
 ```
 
 followed by a `/v1/chat/completions` request. Skip it when there's no vLLM

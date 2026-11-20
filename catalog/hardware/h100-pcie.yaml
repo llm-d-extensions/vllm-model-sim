@@ -7,7 +7,7 @@ memory_gib: 80
 node_selector:
   nvidia.com/gpu.product: NVIDIA-H100-PCIe
 # vLLM's scheduler defaults for this GPU class (OpenAI server; see
-# _get_default_max_num_seqs_and_batched_tokens in vllm/engine/arg_utils.py).
+# EngineArgs.get_batch_defaults in vllm/engine/arg_utils.py).
 vllm_defaults:
   max_num_batched_tokens: 8192
   max_num_seqs: 1024

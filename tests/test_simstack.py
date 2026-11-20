@@ -142,7 +142,8 @@ def test_eval_stack_invariants(stack_dir, variant):
 
 
 def test_tp_divides_omp_binding_per_rank():
-    stack = next(Stack.load(s) for s in STACKS if Stack.load(s).tp == 2)
+    stack = next(st for st in map(Stack.load, STACKS)
+                 if st.tp == 2 and st.topology == "pd")
     files = Renderer(stack).render_deploy()
     env = _container(_one(files, "decode-deployment.yaml"))["env"]
     bind = next(e["value"] for e in env if e["name"] == "VLLM_CPU_OMP_THREADS_BIND")

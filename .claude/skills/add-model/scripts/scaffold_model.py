@@ -5,11 +5,13 @@ Writes:
   catalog/models/<slug>/config.json    real HF config (cleaned)
   catalog/models/<slug>/model.yaml     HF id, served model name, weight dtype
   catalog/hardware/<hw>.yaml           only for new hardware (--peak-tflops ...)
+  calibrations/<slug>/<hw>.yaml        flat (linear) debugging record; --beta record
   deploy/<stack>/stack.yaml, sweep.yaml
   deploy/<stack>/k8s/                  rendered by `python -m simstack render`
 
-With no calibration record for the stack, the sim runs the physics roofline
-model with unit betas [1.0, 1.0, 0.0], no tuning. READMEs and inventory tables
+With no physics calibration record for the stack, the sim runs the physics
+roofline model with unit betas [1.0, 1.0, 0.0], no tuning. If
+catalog/models/<slug>/ exists, it is reused and --model may be omitted. READMEs and inventory tables
 are left to the caller (see SKILL.md); this script only produces the files
 whose contents are mechanical.
 
@@ -98,13 +100,22 @@ def clean_real_config(raw: dict) -> tuple[dict, str, list[str]]:
                 cfg[k] = text[k]
         warnings.append("hoisted decoder fields from text_config to the top level")
 
-    # Mixtral names it num_local_experts; the physics model reads num_experts.
+    # Mixtral and gpt-oss name it num_local_experts and give the per-expert
+    # FFN width as intermediate_size; the physics model reads num_experts and
+    # moe_intermediate_size, and would otherwise cost the MoE FFN at zero.
     if "num_local_experts" in cfg and "num_experts" not in cfg:
         cfg["num_experts"] = cfg["num_local_experts"]
+    if cfg.get("num_experts") and "moe_intermediate_size" not in cfg:
+        cfg["moe_intermediate_size"] = cfg.get("intermediate_size", 0)
+        warnings.append("moe_intermediate_size: copied from intermediate_size "
+                        "(per-expert width, Mixtral-style config)")
 
     for key, why in UNSUPPORTED.items():
         if cfg.get(key) or (isinstance(text, dict) and text.get(key)):
-            if key == "layer_types" and set(cfg.get(key) or []) <= {"full_attention"}:
+            layers = cfg.get(key) or (text or {}).get(key) or []
+            if key == "layer_types" and set(layers) <= {"full_attention"}:
+                continue
+            if key == "sliding_window" and cfg.get("use_sliding_window") is False:
                 continue
             warnings.append(f"{key}: {why}")
 
@@ -136,7 +147,10 @@ def clean_real_config(raw: dict) -> tuple[dict, str, list[str]]:
 
 
 def vllm_defaults(memory_gib: float, name: str) -> dict:
-    """vLLM's OpenAI-server scheduler defaults for a GPU (vllm/engine/arg_utils.py)."""
+    """vLLM's OpenAI-server scheduler defaults for a GPU.
+
+    Mirrors EngineArgs.get_batch_defaults in vllm/engine/arg_utils.py.
+    """
     if memory_gib >= 160:
         return {"max_num_batched_tokens": 16384, "max_num_seqs": 1024}
     if memory_gib >= 70 and "a100" not in name.lower():
@@ -164,7 +178,7 @@ memory_gib: {args.memory_gib:g}
 node_selector:
   nvidia.com/gpu.product: {args.gpu_product}
 # vLLM's scheduler defaults for this GPU class (OpenAI server; see
-# _get_default_max_num_seqs_and_batched_tokens in vllm/engine/arg_utils.py).
+# EngineArgs.get_batch_defaults in vllm/engine/arg_utils.py).
 vllm_defaults:
   max_num_batched_tokens: {d["max_num_batched_tokens"]}
   max_num_seqs: {d["max_num_seqs"]}
@@ -175,9 +189,69 @@ kv_transfer:
 """, args.force)
 
 
+CALIBRATION_HEADER = """\
+# Latency calibrations for {model} on {hw}.
+#
+# A record applies to a sim pod when every key in its `match` equals the pod's
+# value (keys: topology, tp, role). The most specific match wins; a tie is an
+# error. With no physics match, the sim falls back to unit betas [1.0, 1.0, 0.0].
+#
+# method: fitted (tuned against the real GPU), copied (taken from another
+# record, never measured for this match) or assumed.
+"""
+# The `flat` eval variant needs a linear record; without one eval.sh and
+# tests/test_simstack.py fail for the stack. Same values as Qwen3-32B's.
+FLAT_RECORD = {
+    "latency": {"type": "linear", "base_ms": 5.0, "prefill_ms_per_token": 0.05,
+                "decode_ms_per_seq": 1.2, "ctx_ms_per_ktoken": 0.3},
+    "method": "assumed",
+    "note": "Flat latency model, a debugging aid; not fitted.",
+}
+
+
+def write_calibrations(args) -> None:
+    """Ensure a linear record exists; upsert a physics record for --beta.
+
+    Physics is left unrecorded by default so the stack resolves to unit betas.
+    """
+    import yaml
+
+    from simstack.__main__ import _header, dump_calibrations
+    from simstack.catalog import calibration_path
+
+    path = calibration_path(args.slug, args.hardware)
+    if path.exists():
+        text = path.read_text()
+        header, records = _header(text), yaml.safe_load(text) or []
+    else:
+        header = CALIBRATION_HEADER.format(model=args.slug, hw=args.hardware)
+        records = []
+    changed = False
+    if not any(r["latency"].get("type") == "linear" for r in records):
+        records.append(copy.deepcopy(FLAT_RECORD))
+        changed = True
+    if args.beta:
+        match = {"topology": "standalone", "tp": args.tp}
+        record = {"match": match,
+                  "latency": {"type": "physics", "beta": [float(b) for b in args.beta]},
+                  "method": "assumed", "note": "Supplied by the user, not fitted."}
+        for i, r in enumerate(records):
+            if r.get("match") == match and r["latency"].get("type") == "physics":
+                records[i] = record
+                break
+        else:
+            records.insert(0, record)
+        changed = True
+    if changed:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(header + "\n" + dump_calibrations(records))
+        print(f"wrote {os.path.relpath(path, REPO)}")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--model", required=True, help="HF id, or path to a config.json")
+    ap.add_argument("--model",
+                    help="HF id, or path to a config.json (omit to reuse catalog/models/<slug>/)")
     ap.add_argument("--hf-id", help="HF id for --tokenizer (required if --model is a path)")
     ap.add_argument("--slug", required=True,
                     help="catalog name and resource-name stem, DNS-safe, e.g. llama-3-1-8b-instruct")
@@ -197,25 +271,44 @@ def main(argv=None):
     if not re.fullmatch(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?", args.slug):
         sys.exit(f"slug {args.slug!r} must be lower-case letters, digits and '-' "
                  "(it ends up in Kubernetes resource names); e.g. replace '.' with '-'")
-    served = args.served_model_name or args.slug
-    hf_id = args.hf_id or (None if os.path.isfile(args.model) else args.model)
-    if not hf_id:
-        sys.exit("--hf-id is required when --model is a local path")
 
     hw_path = os.path.join(REPO, "catalog", "hardware", f"{args.hardware}.yaml")
-    if not os.path.exists(hw_path):
-        if None in (args.peak_tflops, args.hbm_gbps, args.memory_gib, args.gpu_product):
-            sys.exit(f"unknown hardware {args.hardware!r}: pass --peak-tflops, "
-                     "--hbm-gbps, --memory-gib and --gpu-product to add it")
-        write_hardware(hw_path, args)
+    new_hw = not os.path.exists(hw_path)
+    if new_hw and None in (args.peak_tflops, args.hbm_gbps, args.memory_gib,
+                           args.gpu_product):
+        sys.exit(f"unknown hardware {args.hardware!r}: pass --peak-tflops, "
+                 "--hbm-gbps, --memory-gib and --gpu-product to add it")
 
-    real, weight_dtype, warnings = clean_real_config(load_config(args.model))
+    # An existing catalog model is reused as is (new GPU or TP for it), unless
+    # --model and --force ask to replace it.
     model_dir = os.path.join(REPO, "catalog", "models", args.slug)
-    write(os.path.join(model_dir, "config.json"), json.dumps(real, indent=2) + "\n",
-          args.force)
-    write(os.path.join(model_dir, "model.yaml"),
-          f"hf_id: {hf_id}\nserved_model_name: {served}\nweight_dtype: {weight_dtype}\n",
-          args.force)
+    reuse = os.path.exists(os.path.join(model_dir, "model.yaml")) and not (
+        args.model and args.force)
+    if reuse:
+        from simstack.catalog import load_model
+
+        meta, _ = load_model(args.slug)
+        hf_id, served = meta["hf_id"], meta["served_model_name"]
+        weight_dtype, warnings = meta.get("weight_dtype", "bfloat16"), []
+        print(f"reusing catalog/models/{args.slug}/")
+    else:
+        if not args.model:
+            sys.exit(f"catalog/models/{args.slug}/ does not exist: pass --model")
+        served = args.served_model_name or args.slug
+        hf_id = args.hf_id or (None if os.path.isfile(args.model) else args.model)
+        if not hf_id:
+            sys.exit("--hf-id is required when --model is a local path")
+        # Load before writing anything, so a failed download leaves no files.
+        real, weight_dtype, warnings = clean_real_config(load_config(args.model))
+
+    if new_hw:
+        write_hardware(hw_path, args)
+    if not reuse:
+        write(os.path.join(model_dir, "config.json"),
+              json.dumps(real, indent=2) + "\n", args.force)
+        write(os.path.join(model_dir, "model.yaml"),
+              f"hf_id: {hf_id}\nserved_model_name: {served}\n"
+              f"weight_dtype: {weight_dtype}\n", args.force)
 
     stack = f"{args.slug}-{args.hardware}-standalone" + (
         f"-tp{args.tp}" if args.tp > 1 else "")
@@ -227,13 +320,7 @@ def main(argv=None):
     if not os.path.exists(sweep) or args.force:
         shutil.copy(os.path.join(REPO, "evaluation", "sweep.yaml"), sweep)
 
-    if args.beta:
-        cal = os.path.join(REPO, "calibrations", args.slug, f"{args.hardware}.yaml")
-        os.makedirs(os.path.dirname(cal), exist_ok=True)
-        with open(cal, "a") as f:
-            f.write(f"\n- match: {{topology: standalone, tp: {args.tp}}}\n"
-                    f"  latency: {{type: physics, beta: {[float(b) for b in args.beta]}}}\n"
-                    "  method: assumed\n  note: Supplied by the user, not fitted.\n")
+    write_calibrations(args)
 
     from simstack.__main__ import render_k8s
     from simstack.catalog import Stack

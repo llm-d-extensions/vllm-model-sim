@@ -110,7 +110,7 @@ profile: default
 
 **A GPU:** add `catalog/hardware/<gpu>.yaml`, copying an existing file. Use the
 dense BF16 peak, not the sparsity figure. Take `vllm_defaults` from
-`_get_default_max_num_seqs_and_batched_tokens` in vLLM's
+`EngineArgs.get_batch_defaults` in vLLM's
 `vllm/engine/arg_utils.py`: it depends on GPU memory and on whether the GPU is
 an A100.
 

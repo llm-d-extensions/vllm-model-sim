@@ -16,10 +16,11 @@ plugin from `--tensor-parallel-size`.
 | `l40s` | NVIDIA L40S 48 GB | 362 | 864 | 2048 / 256 |
 | `b200` | NVIDIA B200 180 GB | 2250 | 8000 | 16384 / 1024 |
 
-The vLLM defaults come from `_get_default_max_num_seqs_and_batched_tokens` in
-`vllm/engine/arg_utils.py`: ≥ 160 GiB gets 16384/1024, ≥ 70 GiB non-A100 gets
-8192/1024, and everything else gets 2048/256. The renderer pins them on both the
-real and the sim pods, because on CPU vLLM would otherwise default to 2048/128.
+The vLLM defaults come from `EngineArgs.get_batch_defaults` in
+`vllm/engine/arg_utils.py` (OpenAI server values): ≥ 160 GiB gets 16384/1024,
+≥ 70 GiB non-A100 gets 8192/1024, and everything else gets 2048/256. The
+renderer pins them on both the real and the sim pods, because on CPU vLLM would
+otherwise default to 2048/128 per TP rank.
 
 The physics model uses one `peak_tflops` for all math, whatever the weight
 dtype. For FP8 checkpoints only the weight bytes change

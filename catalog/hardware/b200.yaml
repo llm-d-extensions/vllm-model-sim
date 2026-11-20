@@ -7,7 +7,7 @@ memory_gib: 180
 node_selector:
   nvidia.com/gpu.product: NVIDIA-B200
 # vLLM's scheduler defaults for this GPU class (OpenAI server; see
-# _get_default_max_num_seqs_and_batched_tokens in vllm/engine/arg_utils.py).
+# EngineArgs.get_batch_defaults in vllm/engine/arg_utils.py).
 vllm_defaults:
   max_num_batched_tokens: 16384
   max_num_seqs: 1024
