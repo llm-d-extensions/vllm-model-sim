@@ -1,0 +1,37 @@
+# Latency calibrations for Qwen3-32B on H100 SXM5.
+#
+# A record applies to a sim pod when every key in its `match` equals the pod's
+# value (keys: topology, tp, role). The most specific match wins; a tie is an
+# error. With no physics match, the sim falls back to unit betas [1.0, 1.0, 0.0].
+#
+# method: fitted (tuned against the real GPU), copied (taken from another
+# record, never measured for this match) or assumed.
+
+- match: {topology: standalone, tp: 1}
+  latency: {type: physics, beta: [0.152128, 0.0, 126.024825]}
+  method: fitted
+  source: models/qwen3-32b/deployments/h100-sxm5/standalone/k8s (pre-catalog layout)
+  note: >-
+    Suspect. Gives about +441% ITL at concurrency 1 per the
+    llm-d-autoscaling-research findings (vllm-model-sim.md); 0.152 equals
+    BLIS iter29's global beta1a. Re-tune before relying on it.
+
+- match: {topology: pd, tp: 1}
+  latency: {type: physics, beta: [3.119229, 1.182904, 0.146612]}
+  method: fitted
+  source: models/qwen3-32b/deployments/h100-sxm5/pd/k8s (pre-catalog layout)
+
+- match: {topology: pd, tp: 2}
+  latency: {type: physics, beta: [0.152128, 0.0, 126.024825]}
+  method: copied
+  source: standalone TP=1 record
+  note: Not calibrated for TP=2; delete this record to fall back to unit betas.
+
+- latency:
+    type: linear
+    base_ms: 5.0
+    prefill_ms_per_token: 0.05
+    decode_ms_per_seq: 1.2
+    ctx_ms_per_ktoken: 0.3
+  method: assumed
+  note: Flat latency model, a debugging aid; not fitted.

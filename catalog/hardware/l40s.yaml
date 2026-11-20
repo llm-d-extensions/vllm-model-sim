@@ -1,0 +1,17 @@
+# NVIDIA L40S 48 GB.
+name: NVIDIA L40S 48 GB
+peak_tflops: 362.0        # dense BF16
+hbm_gbps: 864.0
+memory_gib: 48
+# Node selector for the real GPU pods. Verify or replace for your cluster.
+node_selector:
+  nvidia.com/gpu.product: NVIDIA-L40S
+# vLLM's scheduler defaults for this GPU class (OpenAI server; see
+# _get_default_max_num_seqs_and_batched_tokens in vllm/engine/arg_utils.py).
+vllm_defaults:
+  max_num_batched_tokens: 2048
+  max_num_seqs: 256
+# KV transfer between prefill and decode pods (simulated NIXL).
+kv_transfer:
+  bandwidth_gbps: 100
+  handshake_ms: 2

@@ -1,6 +1,5 @@
 import argparse
 import json
-import re
 import subprocess
 import sys
 import urllib.request
@@ -179,33 +178,6 @@ def run(
     print(f"overall median MAPE: {agg['overall'] * 100:.1f}%")
 
 
-def _replace_beta(text: str, beta: list[float]) -> str:
-    """Replace the "beta": [...] value in JSON text without reformatting other keys."""
-    return re.sub(r'"beta":\s*\[[\s\S]*?\]', f'"beta": {json.dumps(beta)}', text)
-
-
-def promote(*, deployment_dir: str, latency_model: str = "physics") -> None:
-    """Promote a tuned beta into the k8s sim-config.json and configmap.yaml."""
-    dep = Path(deployment_dir)
-    tuned_path = dep / "evaluation" / "results" / latency_model / "tuned-sim-config.json"
-    if not tuned_path.exists():
-        raise FileNotFoundError(f"tuned config not found: {tuned_path}")
-
-    with open(tuned_path) as f:
-        tuned = json.load(f)
-    beta = tuned["latency"]["beta"]
-    print(f"promoting beta from {tuned_path}: {beta}")
-
-    k8s = dep / "k8s"
-    sim_cfg = k8s / "sim-config.json"
-    sim_cfg.write_text(_replace_beta(sim_cfg.read_text(), beta))
-    print(f"updated {sim_cfg}")
-
-    cm_path = k8s / "configmap.yaml"
-    cm_path.write_text(_replace_beta(cm_path.read_text(), beta))
-    print(f"updated {cm_path}")
-
-
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Sim-vs-real evaluation tools.")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -225,24 +197,12 @@ def main(argv=None):
         help="Path to sim ConfigMap YAML or sim-config.json; included in the report.",
     )
 
-    pp = sub.add_parser("promote", help="Promote tuned beta into k8s config files.")
-    pp.add_argument(
-        "--deployment-dir", required=True,
-        help="Deployment directory (parent of k8s/ and evaluation/).",
-    )
-    pp.add_argument(
-        "--latency-model", default="physics",
-        help="Latency model variant whose tuned results to promote (default: physics).",
-    )
-
     args = ap.parse_args(argv)
     if args.cmd == "eval":
         run(real_url=args.real_url, sim_url=args.sim_url,
             tokenizer=args.tokenizer, sweep_path=args.sweep, out_dir=args.out,
             seed=args.seed, warmup=not args.no_warmup,
             model_config=args.model_config)
-    elif args.cmd == "promote":
-        promote(deployment_dir=args.deployment_dir, latency_model=args.latency_model)
 
 
 if __name__ == "__main__":

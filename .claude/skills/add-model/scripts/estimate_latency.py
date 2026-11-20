@@ -5,7 +5,7 @@ Uses the plugin's own PhysicsLatencyModel (no vLLM import needed), so the
 numbers are exactly what the simulator will sleep for.
 
   python .claude/skills/add-model/scripts/estimate_latency.py \
-      models/<slug>/deployments/<hw>/standalone/k8s/sim-config.json [--tp N]
+      deploy/<stack>/k8s/sim-config.json [--tp N]
 """
 
 import argparse

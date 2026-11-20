@@ -1,0 +1,3 @@
+hf_id: Qwen/Qwen3-32B
+served_model_name: qwen3-32b
+weight_dtype: bfloat16

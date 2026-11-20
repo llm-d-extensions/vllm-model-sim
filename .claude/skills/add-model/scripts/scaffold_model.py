@@ -1,42 +1,34 @@
 #!/usr/bin/env python3
-"""Scaffold models/<slug>/ with an untuned physics deployment.
+"""Scaffold a catalog model and a standalone stack with untuned physics.
 
 Writes:
-  models/<slug>/config.json                      real HF config (cleaned)
-  models/<slug>/deployments/<hw>/standalone/k8s/ sim-config.json, configmap.yaml,
-                                                 deployment.yaml, service.yaml, pvc.yaml
+  catalog/models/<slug>/config.json    real HF config (cleaned)
+  catalog/models/<slug>/model.yaml     HF id, served model name, weight dtype
+  catalog/hardware/<hw>.yaml           only for new hardware (--peak-tflops ...)
+  deploy/<stack>/stack.yaml, sweep.yaml
+  deploy/<stack>/k8s/                  rendered by `python -m simstack render`
 
-The latency block is the physics roofline model with unit betas
-[1.0, 1.0, 0.0] — no tuning. READMEs and inventory tables are left to the
-caller (see SKILL.md); this script only produces the files whose contents
-are mechanical.
+With no calibration record for the stack, the sim runs the physics roofline
+model with unit betas [1.0, 1.0, 0.0], no tuning. READMEs and inventory tables
+are left to the caller (see SKILL.md); this script only produces the files
+whose contents are mechanical.
 
-Run from the repo root:
+Run from the repo root (needs PyYAML, as simstack does):
   python .claude/skills/add-model/scripts/scaffold_model.py \
       --model Qwen/Qwen3-8B --slug qwen3-8b --hardware h100-sxm5 [--tp 1]
 """
 
 import argparse
 import copy
-import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 
-# Dense BF16 tensor-core peak (no sparsity) and HBM bandwidth per GPU.
-HARDWARE = {
-    "h100-sxm5": (989.0, 3350.0),
-    "h100-pcie": (756.0, 2000.0),
-    "h200": (989.0, 4800.0),
-    "a100-sxm4-80gb": (312.0, 2039.0),
-    "a100-pcie-80gb": (312.0, 1935.0),
-    "l40s": (362.0, 864.0),
-    "b200": (2250.0, 8000.0),
-    "mi300x": (1307.0, 5300.0),
-}
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), *[".."] * 4))
+sys.path.insert(0, REPO)
 
-DEFAULT_BETA = [1.0, 1.0, 0.0]
 # Keys the physics model and vLLM's config loader read from the top level.
 ARCH_KEYS = (
     "hidden_size",
@@ -143,188 +135,13 @@ def clean_real_config(raw: dict) -> tuple[dict, str, list[str]]:
     return cfg, weight_dtype, warnings
 
 
-def build_sim_config(real: dict, peak_tflops: float, hbm_gbps: float, weight_dtype: str,
-                     beta=DEFAULT_BETA) -> dict:
-    sim = copy.deepcopy(real)
-    sim["architectures"] = ["SimulatedForCausalLM"]
-    # tp is injected at load time from --tensor-parallel-size; never write it.
-    sim["latency"] = {
-        "type": "physics",
-        "hardware": {
-            "peak_tflops": peak_tflops,
-            "hbm_gbps": hbm_gbps,
-            "weight_dtype": weight_dtype,
-        },
-        "beta": [float(b) for b in beta],
-        "deterministic_length": True,
-    }
-    return sim
-
-
-def config_hash(sim: dict) -> str:
-    # Same scheme as the existing manifests: sha256 of the sorted-key JSON.
-    return hashlib.sha256(json.dumps(sim, sort_keys=True).encode()).hexdigest()[:6]
-
-
-def render_configmap(name: str, sim_json: str) -> str:
-    body = "\n".join("    " + line for line in sim_json.splitlines())
-    return (
-        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n"
-        f"  name: {name}-config\ndata:\n  config.json: |\n{body}\n"
-    )
-
-
-def render_deployment(name, slug, served, hf_id, tp, max_len) -> str:
-    cpu = str(4 * tp)
-    mem = f"{8 * tp}Gi"
-    omp = f"0-{4 * tp - 1}"
-    tp_arg = f"        - --tensor-parallel-size={tp}\n" if tp > 1 else ""
-    return f"""apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: {name}
-  labels:
-    app: {name}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: {name}
-  template:
-    metadata:
-      labels:
-        app: {name}
-    spec:
-      initContainers:
-      - name: install-plugin
-        image: ghcr.io/llm-d-extensions/vllm-sim-deps:v0.3.0
-        imagePullPolicy: Always
-        command:
-        - sh
-        - -c
-        - cp -r /plugins/* /mnt/plugins/
-        volumeMounts:
-        - name: plugins
-          mountPath: /mnt/plugins
-      containers:
-      - name: vllm
-        image: vllm/vllm-openai-cpu:v0.27.0-x86_64
-        command:
-        - vllm
-        - serve
-        - /model
-        - --load-format=dummy
-        - --max-model-len={max_len}
-        - --tokenizer={hf_id}
-        - --served-model-name={served}
-        - --gpu-memory-utilization=0.5
-{tp_arg}        env:
-        - name: PYTHONPATH
-          value: /plugins
-        - name: VLLM_CPU_KVCACHE_SPACE
-          value: "4"
-        - name: VLLM_CPU_OMP_THREADS_BIND
-          value: "{omp}"
-        - name: HOME
-          value: /tmp
-        - name: XDG_CACHE_HOME
-          value: /tmp/cache
-        - name: HF_HOME
-          value: /hf-cache
-        - name: HF_HUB_CACHE
-          value: /hf-cache
-        - name: HF_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: hf-token
-              key: token
-              optional: true
-        ports:
-        - containerPort: 8000
-          name: http
-        startupProbe:
-          httpGet:
-            path: /health
-            port: 8000
-          periodSeconds: 5
-          failureThreshold: 30
-        livenessProbe:
-          httpGet:
-            path: /health
-            port: 8000
-          periodSeconds: 10
-          failureThreshold: 3
-        readinessProbe:
-          httpGet:
-            path: /health
-            port: 8000
-          periodSeconds: 5
-          failureThreshold: 3
-        resources:
-          requests:
-            cpu: "{cpu}"
-            memory: {mem}
-          limits:
-            cpu: "{cpu}"
-            memory: {mem}
-        volumeMounts:
-        - name: plugins
-          mountPath: /plugins
-        - name: model-config
-          mountPath: /model
-          readOnly: true
-        - name: dshm
-          mountPath: /dev/shm
-        - name: hf-cache
-          mountPath: /hf-cache
-      volumes:
-      - name: plugins
-        emptyDir: {{}}
-      - name: model-config
-        configMap:
-          name: {name}-config
-      - name: dshm
-        emptyDir:
-          medium: Memory
-          sizeLimit: 256Mi
-      - name: hf-cache
-        persistentVolumeClaim:
-          claimName: vllm-{slug}-hf-cache
-"""
-
-
-def render_service(name: str) -> str:
-    return f"""apiVersion: v1
-kind: Service
-metadata:
-  name: {name}
-spec:
-  selector:
-    app: {name}
-  ports:
-  - name: http
-    port: 8000
-    targetPort: 8000
-  type: ClusterIP
-"""
-
-
-def render_pvc(slug: str) -> str:
-    return f"""apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: vllm-{slug}-hf-cache
-spec:
-  # ReadWriteMany so every replica shares one warm HuggingFace cache: the
-  # first pod downloads the tokenizer, the rest read it without hitting the
-  # network on the cold-start critical path.
-  accessModes:
-    - ReadWriteMany
-  storageClassName: ibm-spectrum-scale-fileset
-  resources:
-    requests:
-      storage: 1Gi
-"""
+def vllm_defaults(memory_gib: float, name: str) -> dict:
+    """vLLM's OpenAI-server scheduler defaults for a GPU (vllm/engine/arg_utils.py)."""
+    if memory_gib >= 160:
+        return {"max_num_batched_tokens": 16384, "max_num_seqs": 1024}
+    if memory_gib >= 70 and "a100" not in name.lower():
+        return {"max_num_batched_tokens": 8192, "max_num_seqs": 1024}
+    return {"max_num_batched_tokens": 2048, "max_num_seqs": 256}
 
 
 def write(path: str, text: str, force: bool) -> None:
@@ -333,7 +150,29 @@ def write(path: str, text: str, force: bool) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         f.write(text)
-    print(f"wrote {path}")
+    print(f"wrote {os.path.relpath(path, REPO)}")
+
+
+def write_hardware(path, args) -> None:
+    d = vllm_defaults(args.memory_gib, args.hardware)
+    write(path, f"""# {args.hardware} (added by the add-model skill; check the specs).
+name: {args.hardware}
+peak_tflops: {args.peak_tflops}        # dense BF16
+hbm_gbps: {args.hbm_gbps}
+memory_gib: {args.memory_gib:g}
+# Node selector for the real GPU pods. Verify or replace for your cluster.
+node_selector:
+  nvidia.com/gpu.product: {args.gpu_product}
+# vLLM's scheduler defaults for this GPU class (OpenAI server; see
+# _get_default_max_num_seqs_and_batched_tokens in vllm/engine/arg_utils.py).
+vllm_defaults:
+  max_num_batched_tokens: {d["max_num_batched_tokens"]}
+  max_num_seqs: {d["max_num_seqs"]}
+# KV transfer between prefill and decode pods (simulated NIXL).
+kv_transfer:
+  bandwidth_gbps: 100
+  handshake_ms: 2
+""", args.force)
 
 
 def main(argv=None):
@@ -341,16 +180,17 @@ def main(argv=None):
     ap.add_argument("--model", required=True, help="HF id, or path to a config.json")
     ap.add_argument("--hf-id", help="HF id for --tokenizer (required if --model is a path)")
     ap.add_argument("--slug", required=True,
-                    help="directory and resource-name stem, DNS-safe, e.g. llama-3-1-8b-instruct")
+                    help="catalog name and resource-name stem, DNS-safe, e.g. llama-3-1-8b-instruct")
     ap.add_argument("--served-model-name", help="API model name (default: slug); dots allowed")
-    ap.add_argument("--hardware", default="h100-sxm5", help=f"one of {sorted(HARDWARE)} or custom")
-    ap.add_argument("--peak-tflops", type=float, help="override (required for custom hardware)")
-    ap.add_argument("--hbm-gbps", type=float, help="override (required for custom hardware)")
+    ap.add_argument("--hardware", default="h100-sxm5",
+                    help="a catalog/hardware/ slug, or a new one with --peak-tflops etc.")
+    ap.add_argument("--peak-tflops", type=float, help="dense BF16 peak, for new hardware")
+    ap.add_argument("--hbm-gbps", type=float, help="HBM bandwidth (GB/s), for new hardware")
+    ap.add_argument("--memory-gib", type=float, help="GPU memory (GiB), for new hardware")
+    ap.add_argument("--gpu-product", help="nvidia.com/gpu.product label, for new hardware")
     ap.add_argument("--tp", type=int, default=1)
-    ap.add_argument("--beta", type=float, nargs=3, default=DEFAULT_BETA,
-                    metavar=("PF", "DC", "BASE_MS"), help="default: 1 1 0 (untuned)")
-    ap.add_argument("--max-model-len", type=int, default=16384)
-    ap.add_argument("--root", default="models")
+    ap.add_argument("--beta", type=float, nargs=3, metavar=("PF", "DC", "BASE_MS"),
+                    help="user-supplied betas (default: none, i.e. unit betas)")
     ap.add_argument("--force", action="store_true")
     args = ap.parse_args(argv)
 
@@ -361,39 +201,57 @@ def main(argv=None):
     hf_id = args.hf_id or (None if os.path.isfile(args.model) else args.model)
     if not hf_id:
         sys.exit("--hf-id is required when --model is a local path")
-    peak, bw = HARDWARE.get(args.hardware, (None, None))
-    peak = args.peak_tflops or peak
-    bw = args.hbm_gbps or bw
-    if peak is None or bw is None:
-        sys.exit(f"unknown hardware {args.hardware!r}: pass --peak-tflops and --hbm-gbps")
+
+    hw_path = os.path.join(REPO, "catalog", "hardware", f"{args.hardware}.yaml")
+    if not os.path.exists(hw_path):
+        if None in (args.peak_tflops, args.hbm_gbps, args.memory_gib, args.gpu_product):
+            sys.exit(f"unknown hardware {args.hardware!r}: pass --peak-tflops, "
+                     "--hbm-gbps, --memory-gib and --gpu-product to add it")
+        write_hardware(hw_path, args)
 
     real, weight_dtype, warnings = clean_real_config(load_config(args.model))
-    sim = build_sim_config(real, peak, bw, weight_dtype, args.beta)
-    h = config_hash(sim)
-    name = f"vllm-{args.slug}-standalone-{h}"
-    max_len = min(args.max_model_len, real.get("max_position_embeddings", args.max_model_len))
+    model_dir = os.path.join(REPO, "catalog", "models", args.slug)
+    write(os.path.join(model_dir, "config.json"), json.dumps(real, indent=2) + "\n",
+          args.force)
+    write(os.path.join(model_dir, "model.yaml"),
+          f"hf_id: {hf_id}\nserved_model_name: {served}\nweight_dtype: {weight_dtype}\n",
+          args.force)
 
-    model_dir = os.path.join(args.root, args.slug)
-    k8s = os.path.join(model_dir, "deployments", args.hardware, "standalone", "k8s")
-    sim_json = json.dumps(sim, indent=2) + "\n"
-    write(os.path.join(model_dir, "config.json"), json.dumps(real, indent=2) + "\n", args.force)
-    write(os.path.join(k8s, "sim-config.json"), sim_json, args.force)
-    write(os.path.join(k8s, "configmap.yaml"), render_configmap(name, sim_json), args.force)
-    write(os.path.join(k8s, "deployment.yaml"),
-          render_deployment(name, args.slug, served, hf_id, args.tp, max_len), args.force)
-    write(os.path.join(k8s, "service.yaml"), render_service(name), args.force)
-    write(os.path.join(k8s, "pvc.yaml"), render_pvc(args.slug), args.force)
+    stack = f"{args.slug}-{args.hardware}-standalone" + (
+        f"-tp{args.tp}" if args.tp > 1 else "")
+    stack_dir = os.path.join(REPO, "deploy", stack)
+    write(os.path.join(stack_dir, "stack.yaml"),
+          f"model: {args.slug}\nhardware: {args.hardware}\ntopology: standalone\n"
+          f"tp: {args.tp}\nprofile: default\n", args.force)
+    sweep = os.path.join(stack_dir, "sweep.yaml")
+    if not os.path.exists(sweep) or args.force:
+        shutil.copy(os.path.join(REPO, "evaluation", "sweep.yaml"), sweep)
 
+    if args.beta:
+        cal = os.path.join(REPO, "calibrations", args.slug, f"{args.hardware}.yaml")
+        os.makedirs(os.path.dirname(cal), exist_ok=True)
+        with open(cal, "a") as f:
+            f.write(f"\n- match: {{topology: standalone, tp: {args.tp}}}\n"
+                    f"  latency: {{type: physics, beta: {[float(b) for b in args.beta]}}}\n"
+                    "  method: assumed\n  note: Supplied by the user, not fitted.\n")
+
+    from simstack.__main__ import render_k8s
+    from simstack.catalog import Stack
+    from simstack.render import Renderer
+
+    render_k8s(stack_dir)
+    r = Renderer(Stack.load(stack_dir))
+    configs = r.sim_configs("physics")
     summary = {
-        "resource_name": name,
-        "hash": h,
+        "stack": f"deploy/{stack}",
+        "resource_name": r.base_name(configs),
         "hf_id": hf_id,
         "served_model_name": served,
-        "hardware": {"slug": args.hardware, "peak_tflops": peak, "hbm_gbps": bw,
-                     "weight_dtype": weight_dtype},
+        "hardware": args.hardware,
+        "weight_dtype": weight_dtype,
         "tp": args.tp,
-        "max_model_len": max_len,
-        "beta": sim["latency"]["beta"],
+        "engine": r.engine,
+        "beta": configs["standalone"]["latency"]["beta"],
         "warnings": warnings,
     }
     print(json.dumps(summary, indent=2))

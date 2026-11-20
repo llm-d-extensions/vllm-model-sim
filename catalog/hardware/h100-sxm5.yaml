@@ -1,0 +1,18 @@
+# NVIDIA H100 SXM5 80 GB (HBM3).
+name: NVIDIA H100 SXM5 80 GB
+peak_tflops: 989.0        # dense BF16
+hbm_gbps: 3350.0
+memory_gib: 80
+# Node selector for the real GPU pods. Verify or replace for your cluster.
+node_selector:
+  nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
+# vLLM's scheduler defaults for this GPU class (OpenAI server, >= 70 GiB,
+# non-A100; vllm/engine/arg_utils.py). Both the real and the sim pods are
+# pinned to them; otherwise the CPU sim gets the CPU defaults (2048/128).
+vllm_defaults:
+  max_num_batched_tokens: 8192
+  max_num_seqs: 1024
+# KV transfer between prefill and decode pods (simulated NIXL).
+kv_transfer:
+  bandwidth_gbps: 100
+  handshake_ms: 2

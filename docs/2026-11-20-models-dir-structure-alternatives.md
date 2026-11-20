@@ -1,6 +1,7 @@
 # Alternatives to the `models/` directory structure
 
-Status: proposal, for discussion. Nothing in this document is implemented.
+Status: option B implemented (2026-11-20). See [deploy/README.md](../deploy/README.md)
+for the resulting layout and the `simstack` tool.
 
 ## Problem
 

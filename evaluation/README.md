@@ -41,101 +41,98 @@ The baseline physics model configuration (`beta = [1.0, 1.0, 0.0]`) is expected 
 
 4. **Target namespace** where the real and sim servers will be deployed.
 
-## Generate the sim config
+## Stacks and variants
 
-The simulated model's `config.json` must match the real model's architecture. Generate it with:
+Evaluation runs against a **stack**, a `deploy/<stack>/` directory holding
+`stack.yaml` (model, hardware, topology, TP, profile) and `sweep.yaml`. A
+**variant** picks the latency model the sim uses:
 
-```bash
-.venv/bin/python -m evaluation.gen_sim_config \
-  --model Qwen/Qwen3-32B \
-  --out models/qwen3-32b/deployments/h100-sxm5/standalone/evaluation/physics/configmap.yaml
-```
+| Variant | Sim latency |
+|---------|-------------|
+| `physics` (default) | Roofline physics model with the stack's calibration from `calibrations/<model>/<hardware>.yaml` |
+| `physics-beta-1.0` | Roofline physics model, unit betas β = [1.0, 1.0, 0.0]: the uncalibrated baseline |
+| `flat` | Linear model, a debugging aid |
 
-**Flags:**
-- `--model <HF id or path to config.json>` (required): the real model to match
-- `--out <path>` (required): output ConfigMap YAML path
-- `--peak-tflops <float>` (default: 989.0): H100 SXM5 peak TFLOPs
-- `--hbm-gbps <float>` (default: 3350.0): H100 SXM5 HBM bandwidth (GB/s)
-- `--weight-dtype <str>` (default: bfloat16): weight data type
-
-To change the target model or GPU spec, adjust these flags and regenerate. The ConfigMap name is derived from the latency config hash (e.g. `vllm-qwen3-32b-standalone-eae748-config` for the `physics` variant).
+`eval.sh` renders the real and sim stacks for the variant from the catalog,
+profile and calibrations (`python -m simstack render <stack> --eval <variant>`)
+into `.build/<stack>/<variant>/`. Both stacks get the same engine settings
+(`max-model-len`, `max-num-batched-tokens`, `max-num-seqs`), and the sim's
+architecture always comes from the catalog `config.json`. See
+[deploy/README.md](../deploy/README.md) for the layout.
 
 > [!NOTE]
-> The tensor-parallel degree is not a generated config field — the sim reads it
-> from the Deployment's `--tensor-parallel-size` at load time. To simulate a
-> TP=N deployment, set that flag on the sim server (as the `pd-tp2` deployment
-> does); the physics model then divides per-GPU work by N automatically.
+> The tensor-parallel degree is not a config field: the rendered pods pass
+> `--tensor-parallel-size` and the plugin reads it at load time, then divides
+> per-GPU work by it.
 
-### `sim-config.json` sidecar
-
-Each variant dir also keeps a plain-JSON `sim-config.json` — the exact bytes the
-ConfigMap embeds under `data["config.json"]`. It's what the auto-tuner reads and
-rewrites (`eval.sh tune` / `python -m evaluation.tune` load it with `json.load`;
-they can't parse the ConfigMap YAML). Regenerate it from the ConfigMap whenever
-you change `configmap.yaml`:
-
-```bash
-.venv/bin/python -c 'import sys,yaml,json; \
-cm=yaml.safe_load(open(sys.argv[1])); \
-open(sys.argv[2],"w").write(cm["data"]["config.json"])' \
-  models/qwen3-32b/deployments/h100-sxm5/standalone/evaluation/physics/configmap.yaml \
-  models/qwen3-32b/deployments/h100-sxm5/standalone/evaluation/physics/sim-config.json
-```
+The rendered directory also holds `sim-config.json`, the exact bytes the
+ConfigMap embeds under `data["config.json"]`. The auto-tuner reads it (it
+can't parse the ConfigMap YAML).
 
 ## Deploy and run (default, local)
 
-`eval.sh` drives the whole lifecycle from a single **variant directory** (a
-tuned-deployment dir such as `evaluation/physics`): it deploys the
-in-cluster stack, port-forwards both Services, runs the sweep, and tears down —
-no separate `kubectl apply` step needed.
+`eval.sh` drives the whole lifecycle from a stack directory: it renders and
+deploys the in-cluster stack, port-forwards both Services, runs the sweep, and
+tears down. No separate `kubectl apply` step is needed.
 
 ```bash
-# One-shot: setup → run → teardown
-evaluation/eval.sh models/qwen3-32b/deployments/h100-sxm5/standalone/evaluation/physics
+# One-shot: setup → run → teardown, physics variant
+evaluation/eval.sh deploy/qwen3-32b-h100-sxm5-standalone
+
+# Another variant
+evaluation/eval.sh deploy/qwen3-32b-h100-sxm5-standalone physics-beta-1.0
 ```
 
-The single argument is the only thing you provide; from it the script derives:
-- **ConfigMap + real/sim Deployments/Services** it applies during setup (`configmap.yaml` and `eval/*.yaml` — the `benchmark-job.yaml` is skipped; that's the in-cluster path below)
+From the stack and variant the script derives:
+- **ConfigMap + real/sim Deployments/Services** applied during setup (`benchmark-job.yaml` is skipped; that's the in-cluster path below)
 - **real/sim resource names** from those manifests
-- **`--model-config`** from `configmap.yaml` (embeds the latency type, β values, and hardware spec in the report)
-- **sweep matrix** from the evaluation dir's `sweep.yaml` (`<eval>/sweep.yaml`), if present
-- **output directory** `<eval>/results/<variant>` — e.g. `evaluation/results/physics`
+- **`--model-config`** from the rendered `configmap.yaml` (embeds the latency type, β values and hardware spec in the report)
+- **`--tokenizer`** from the catalog model's `hf_id`
+- **sweep matrix** from `deploy/<stack>/sweep.yaml`
+- **output directory** `evaluation/results/<stack>/<variant>`
 
 ### Lifecycle commands
 
 ```bash
-eval.sh setup    <variant-dir>   # apply ConfigMap + real/sim stack, wait for rollout
-eval.sh run      <variant-dir>   # port-forward + benchmark sweep (stack must be up)
-eval.sh tune     <variant-dir>   # setup → auto-tune physics beta → teardown (see below)
-eval.sh teardown <variant-dir>   # delete ConfigMap + real/sim stack
-eval.sh all      <variant-dir>   # setup → run → teardown  (default; = bare <variant-dir>)
+eval.sh setup    <stack-dir> [variant]   # apply ConfigMap + real/sim stack, wait for rollout
+eval.sh run      <stack-dir> [variant]   # port-forward + benchmark sweep (stack must be up)
+eval.sh tune     <stack-dir> [variant]   # setup → auto-tune physics beta → teardown (see below)
+eval.sh promote  <stack-dir>             # write the tuned beta into calibrations/ (no cluster)
+eval.sh teardown <stack-dir> [variant]   # delete ConfigMap + real/sim stack
+eval.sh all      <stack-dir> [variant]   # setup → run → teardown (default; = bare <stack-dir>)
 ```
 
-`all` and `tune` keep the **real** Deployment running after the run — it
+`all` and `tune` keep the **real** Deployment running after the run. It
 downloads ~64 GB of weights on first start (5–10 min), so reusing it across
-variants/iterations is far faster — and remove only the sim + ConfigMap. Use
-`teardown` to remove the real Deployment too, or `KEEP=1 eval.sh all …` to leave
-the whole stack up.
+variants and iterations is far faster; only the sim and its ConfigMap are
+removed. Use `teardown` to remove the real Deployment too, or
+`KEEP=1 eval.sh all …` to leave the whole stack up.
+
+> [!NOTE]
+> The real Deployment's name includes the hash of the variant's sim config, so
+> a different variant starts its own real Deployment. Tear the previous one down
+> when switching.
 
 To iterate on a variant without re-deploying each time:
 
 ```bash
-eval.sh setup    <variant-dir>   # once
-eval.sh run      <variant-dir>   # repeat as needed
-eval.sh teardown <variant-dir>   # when done
+eval.sh setup    <stack-dir>   # once
+eval.sh run      <stack-dir>   # repeat as needed
+eval.sh teardown <stack-dir>   # when done
 ```
 
 `setup` waits up to `SETUP_TIMEOUT` (default `900s`) for both Deployments to roll
 out. Watch progress in another terminal with `oc get pods -n <namespace> -w`.
 
-**Environment overrides** (rarely needed; each defaults to a value derived from the variant dir):
-- `NAMESPACE` (empty): OpenShift namespace
+**Environment overrides** (rarely needed; each defaults to a value derived from the stack and variant):
+- `VLLM_SIM_NAMESPACE` / `NAMESPACE` (empty): target namespace
 - `REAL_SVC` / `SIM_SVC` / `REAL_DEP` / `SIM_DEP`: real / sim resource names
 - `REAL_PORT=9001` / `SIM_PORT=9002`: local ports
-- `OUT`: output directory for reports and result JSONs (also where `tune` writes)
+- `OUT`: output directory for reports and result JSONs (also where `tune` writes and `promote` reads)
 - `MODEL_CONFIG`: path to the sim ConfigMap YAML applied at setup / recorded in the report
 - `SIM_CONFIG`: path to the plain-JSON `sim-config.json` whose `beta` `tune` rewrites
 - `SWEEP`: path to the sweep matrix YAML
+- `TOKENIZER`: tokenizer for the benchmark
 - `KUBECTL=oc`: the Kubernetes CLI to use (e.g., `kubectl` or `oc`)
 - `SETUP_TIMEOUT=900s`: per-Deployment rollout timeout
 - `HEALTH_TIMEOUT=120`: seconds to wait for each `/health` after port-forward
@@ -144,30 +141,28 @@ out. Watch progress in another terminal with `oc get pods -n <namespace> -w`.
 Example targeting a specific namespace:
 
 ```bash
-NAMESPACE=my-namespace \
-evaluation/eval.sh models/qwen3-32b/deployments/h100-sxm5/standalone/evaluation/physics
+NAMESPACE=my-namespace evaluation/eval.sh deploy/qwen3-32b-h100-sxm5-standalone
 ```
 
 The run phase waits for both Services' `/health` endpoints, then runs `run_eval.py` to execute the benchmark sweep. Results land in `$OUT/report.md` and `$OUT/report.json`.
 
 ## Run the evaluation (in-cluster)
 
-Alternatively, run the driver fully in-cluster via a Job. **Note:** This in-cluster Job path has NOT been validated against a live cluster (the validated path is `eval.sh`). It uses the vLLM CPU image (for the `vllm bench serve` CLI) and puts the evaluation source tree on PYTHONPATH.
+Alternatively, run the driver fully in-cluster via a Job. **Note:** This in-cluster Job path has NOT been validated against a live cluster (the validated path is `eval.sh`). It uses the vLLM CPU image (for the `vllm bench serve` CLI) and downloads this repo's `main` branch for the evaluation source tree.
 
 ```bash
-oc apply -n <namespace> -f models/qwen3-32b/deployments/h100-sxm5/standalone/evaluation/physics/eval/benchmark-job.yaml
+evaluation/eval.sh setup deploy/qwen3-32b-h100-sxm5-standalone
+oc apply -n <namespace> -f .build/qwen3-32b-h100-sxm5-standalone/physics/benchmark-job.yaml
 ```
 
-The Job is named **`vllm-qwen3-32b-standalone-eae748-benchmark`**. View logs with:
+The Job is named `<base>-benchmark`, for example
+`vllm-qwen3-32b-standalone-<hash>-benchmark`. View logs and retrieve the
+report from `/out` (an emptyDir):
 
 ```bash
-oc logs -n <namespace> job/vllm-qwen3-32b-standalone-eae748-benchmark -f
-```
-
-Report artifacts are written to `/out` in the pod (backed by an emptyDir). To retrieve them:
-
-```bash
-pod=$(oc get pod -n <namespace> -l app=vllm-qwen3-32b-standalone-eae748-benchmark -o jsonpath='{.items[0].metadata.name}')
+job=$(awk '/^  name:/ {print $2; exit}' .build/qwen3-32b-h100-sxm5-standalone/physics/benchmark-job.yaml)
+oc logs -n <namespace> job/$job -f
+pod=$(oc get pod -n <namespace> -l app=$job -o jsonpath='{.items[0].metadata.name}')
 oc cp -n <namespace> "$pod:/out/report.md" ./report.md
 oc cp -n <namespace> "$pod:/out/report.json" ./report.json
 ```
@@ -215,16 +210,16 @@ parameter — against a fixed tuning workload (ISL=1024, OSL=128, concurrency=1,
 `/sim/config` endpoint).
 
 The `tune` subcommand of `eval.sh` gives it the same one-command UX as an eval
-run — setup, tune, teardown from a single variant directory:
+run — setup, tune, teardown from a single stack directory:
 
 ```bash
 # setup → tune → teardown (real Deployment kept up for reuse)
-evaluation/eval.sh tune models/qwen3-32b/deployments/h100-sxm5/standalone/evaluation/physics
+evaluation/eval.sh tune deploy/qwen3-32b-h100-sxm5-standalone
 ```
 
-From the variant dir it derives the same real/sim resource names and ports as a
-run, tunes against `sim-config.json` (the plain-JSON config `beta` is written
-into), and writes the tuning outputs to `<eval>/results/<variant>`.
+It derives the same real/sim resource names and ports as a run, tunes against
+the rendered `sim-config.json` (in P/D stacks, the decode pod's), and writes the
+tuning outputs to `evaluation/results/<stack>/<variant>`.
 `KEEP=1` leaves the whole stack up; `SIM_CONFIG` / `OUT` override the config and
 output paths.
 
@@ -237,7 +232,7 @@ already-reachable servers (e.g. your own port-forwards):
 python -m evaluation.tune \
   --real-url http://localhost:9001 \
   --sim-url  http://localhost:9002 \
-  --model-config models/qwen3-32b/deployments/h100-sxm5/standalone/evaluation/physics/sim-config.json \
+  --model-config .build/qwen3-32b-h100-sxm5-standalone/physics/sim-config.json \
   --tokenizer Qwen/Qwen3-32B \
   --out tune-out
 ```
@@ -271,30 +266,27 @@ Each optimizer call runs `vllm bench serve` against the sim server (after POSTin
 | `sim-tune-<n>.json` | Sim benchmark result for each optimizer call |
 | `sim-final.json` | Sim benchmark result at the final tuned beta |
 
-After tuning, promote `tuned-sim-config.json` into the k8s deployment directory
-with the `promote` subcommand:
+After tuning, promote the result into the stack's calibration record:
 
 ```bash
-python -m evaluation.run_eval promote \
-  --deployment-dir models/qwen3-32b/deployments/h100-sxm5/standalone
+evaluation/eval.sh promote deploy/qwen3-32b-h100-sxm5-standalone
+# = python -m simstack promote deploy/qwen3-32b-h100-sxm5-standalone \
+#     --tuned evaluation/results/qwen3-32b-h100-sxm5-standalone/physics/tuned-sim-config.json
 ```
 
-Both paths are derived from `--deployment-dir`:
-- tuned config: `<deployment>/evaluation/results/<latency-model>/tuned-sim-config.json`
-- k8s targets: `<deployment>/k8s/sim-config.json` and `<deployment>/k8s/configmap.yaml`
-
-Use `--latency-model` to select a variant other than `physics`.
-
-This updates both `sim-config.json` and `configmap.yaml` in the target directory
-with the new `latency.beta` values. Then re-run the full evaluation sweep
-(`eval.sh run <variant-dir>`) to confirm the improvement generalises across all
-sweep points.
+Promote writes `latency.beta` into the `{topology, tp}` record of
+`calibrations/<model>/<hardware>.yaml`, replacing an existing record for that
+match or adding one, with `method: fitted` and `source:` pointing at the tuned
+config. It then re-renders `deploy/<stack>/k8s/`. Commit the calibration file,
+the re-rendered `k8s/` and the results directory together. Then re-run the full
+evaluation sweep (`eval.sh <stack-dir>`) to confirm the improvement generalises
+across all sweep points.
 
 ## Customize the evaluation
 
 ### Extend the sweep
 
-Edit `<variant-dir>/sweep.yaml` to add more benchmark points:
+Edit `deploy/<stack>/sweep.yaml` to add more benchmark points:
 
 ```yaml
 points:
@@ -309,20 +301,22 @@ Each point runs on the real H100, so keep the matrix small.
 
 ### Change the model or GPU
 
-To evaluate a different model or hardware:
-1. Regenerate the sim config with `gen_sim_config.py` using the appropriate `--model`, `--peak-tflops`, `--hbm-gbps`, and `--weight-dtype` flags. (For a TP deployment, set `--tensor-parallel-size` on the sim server rather than in the config.)
-2. Update `models/qwen3-32b/deployments/h100-sxm5/standalone/evaluation/physics/eval/real-deployment.yaml` to request the correct model and GPU type.
-3. Redeploy: `oc apply -n <namespace> -f models/qwen3-32b/deployments/h100-sxm5/standalone/evaluation/physics/eval/`
+Add the model to `catalog/models/` or the GPU to `catalog/hardware/` if
+needed, then create a stack under `deploy/` naming them. See
+[deploy/README.md](../deploy/README.md#adding-things). The renderer derives the
+sim config, the GPU request, the node selector and the scheduler settings from
+the catalog.
 
 ### Fairness invariants
 
 When customizing, preserve these requirements to keep the comparison valid:
-1. **Identical architecture** — generate the sim config from the real model's `config.json`.
+1. **Identical architecture** — the renderer builds the sim config from the catalog copy of the real model's `config.json`.
 2. **Identical tokenizer** — both servers must use the same `--tokenizer`.
 3. **Fixed output length** — the sim masks EOS (`deterministic_length: true`), and the benchmark must pass `--ignore-eos` to both endpoints (already done by `run_eval.py`).
 4. **Identical served-model-name** — both expose the same model name so one benchmark invocation targets either endpoint.
-5. **Warmup discarded** — warmup requests are excluded from the measured window (use `--no-warmup` to disable if needed).
-6. **Fixed seed & stream** — the same `--seed`, `--num-prompts`, and input/output lengths are used for both runs (enforced by `run_eval.py`).
+5. **Identical scheduler settings** — both get the same `--max-model-len`, `--max-num-batched-tokens` and `--max-num-seqs` from the hardware's `vllm_defaults` and the profile.
+6. **Warmup discarded** — warmup requests are excluded from the measured window (use `--no-warmup` to disable if needed).
+7. **Fixed seed & stream** — the same `--seed`, `--num-prompts`, and input/output lengths are used for both runs (enforced by `run_eval.py`).
 
 ## Troubleshooting
 
@@ -330,12 +324,12 @@ When customizing, preserve these requirements to keep the comparison valid:
 
 The real server downloads Qwen3-32B (~64 GB) on first startup. If readiness takes longer than expected:
 - Check the pod's events: `oc describe pod -n <namespace> <pod-name>`
-- Increase the readiness probe `initialDelaySeconds` in `models/qwen3-32b/deployments/h100-sxm5/standalone/evaluation/physics/eval/real-deployment.yaml` if the default is insufficient.
+- Increase `HEALTH_TIMEOUT` / `SETUP_TIMEOUT`, or the real pod's readiness probe `initialDelaySeconds` in `simstack/render.py`, if the defaults are insufficient.
 - For repeated runs, consider using a PersistentVolumeClaim to cache the weights (not required for MVP).
 
 ### `/dev/shm` sizing
 
-Both deployments mount a 256 Mi `/dev/shm` emptyDir. If vLLM's engine IPC requires more (e.g., for larger models or higher concurrency), increase the `sizeLimit` in the relevant deployment YAML.
+The sim pods mount a `/dev/shm` emptyDir (256 Mi standalone, 1 Gi P/D). If vLLM's engine IPC requires more (e.g., for larger models or higher concurrency), increase the `sizeLimit` in `simstack/render.py` and re-render.
 
 ### OpenShift non-root SCC
 

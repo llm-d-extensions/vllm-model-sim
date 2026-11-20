@@ -3,8 +3,8 @@
 # evaluation sweep or an auto-tuning search against it, then tear it down.
 #
 # Usage:
-#   eval.sh [setup|run|tune|promote|teardown|all] <variant-dir>
-#   eval.sh <variant-dir>                 # shorthand for: all <variant-dir>
+#   eval.sh [setup|run|tune|promote|teardown|all] <stack-dir> [variant]
+#   eval.sh <stack-dir> [variant]          # shorthand for: all <stack-dir> [variant]
 #
 # Commands:
 #   setup     Apply the variant's ConfigMap + real/sim Deployments and Services,
@@ -14,9 +14,9 @@
 #   tune      Full lifecycle: setup, auto-tune the physics `beta` parameters
 #             against the real server, then teardown. Only meaningful for a
 #             physics variant (needs the sim's POST /sim/config endpoint).
-#   promote   Write the tuned beta from evaluation/results/<variant>/ into the
-#             deployment's k8s/sim-config.json and k8s/configmap.yaml. No cluster
-#             access needed; run this after `tune` to persist the result.
+#   promote   Write the tuned beta from the results dir into the stack's
+#             calibrations/<model>/<hardware>.yaml record and re-render
+#             deploy/<stack>/k8s/. No cluster access needed; run after `tune`.
 #   teardown  Delete the ConfigMap + real/sim Deployments and Services.
 #   all       Full lifecycle: setup → run → teardown (the default).
 #
@@ -24,30 +24,22 @@
 # repeated runs reuse its weights; set KEEP=1 to skip teardown entirely, or use
 # `teardown` to remove the real Deployment.
 #
-# <variant-dir> is a tuned-deployment directory such as
-#   models/qwen3-32b/deployments/h100-sxm5/standalone/evaluation/physics
-# It must contain:
-#   - configmap.yaml          (sim model config; applied and recorded in the report)
-#   - sim-config.json         (plain-JSON sim config; its `beta` is tuned by `tune`)
-#   - real-service.yaml, sim-service.yaml   (entry-point services)
+# <stack-dir> is a deploy/<stack> directory holding stack.yaml and sweep.yaml,
+# e.g. deploy/qwen3-32b-h100-sxm5-standalone. [variant] is the latency variant
+# to evaluate: physics (default; the stack's calibration), physics-beta-1.0
+# (unit betas) or flat.
 #
-# Standalone variant (one pod per side):
-#   - real-deployment.yaml, sim-deployment.yaml
-#
-# P/D disaggregated variant (prefill + decode pods per side):
-#   - real-prefill-deployment.yaml, real-prefill-service.yaml, real-decode-deployment.yaml
-#   - sim-prefill-deployment.yaml,  sim-prefill-service.yaml,  sim-decode-deployment.yaml
-#
-# Its parent layout <eval>/<variant> determines where outputs are written:
-# <eval>/results/<variant> (e.g. evaluation/results/physics).
+# The real+sim manifests are rendered from the catalog, profile and
+# calibrations into .build/<stack>/<variant>/ (`python -m simstack render
+# --eval`). Results go to evaluation/results/<stack>/<variant>/.
 #
 # Environment overrides (rarely needed): VLLM_SIM_NAMESPACE (or NAMESPACE),
 # REAL_SVC, SIM_SVC, REAL_DEP, SIM_DEP, REAL_PORT, SIM_PORT, OUT, MODEL_CONFIG,
-# SIM_CONFIG, SWEEP, KUBECTL, PYTHON, SETUP_TIMEOUT, HEALTH_TIMEOUT, KEEP.
+# SIM_CONFIG, SWEEP, TOKENIZER, KUBECTL, PYTHON, SETUP_TIMEOUT, HEALTH_TIMEOUT, KEEP.
 set -euo pipefail
 
 usage() {
-  echo "usage: $(basename "$0") [setup|run|tune|teardown|all] <variant-dir>" >&2
+  echo "usage: $(basename "$0") [setup|run|tune|promote|teardown|all] <stack-dir> [variant]" >&2
   exit 2
 }
 
@@ -57,18 +49,42 @@ case "${1:-}" in
   -h|--help) usage ;;
 esac
 
-[ "$#" -eq 1 ] || usage
+[ "$#" -eq 1 ] || [ "$#" -eq 2 ] || usage
 
-VARIANT_DIR="$1"
-if [ ! -d "$VARIANT_DIR" ]; then
-  echo "ERROR: variant dir not found: $VARIANT_DIR" >&2
+STACK_DIR="$1"
+VARIANT="${2:-physics}"
+if [ ! -f "$STACK_DIR/stack.yaml" ]; then
+  echo "ERROR: not a stack dir (no stack.yaml): $STACK_DIR" >&2
   exit 2
 fi
-VARIANT_DIR="$(cd "$VARIANT_DIR" && pwd)"
-EVAL_MANIFESTS="$VARIANT_DIR"
+STACK_DIR="$(cd "$STACK_DIR" && pwd)"
+STACK="$(basename "$STACK_DIR")"                         # e.g. qwen3-32b-h100-sxm5-pd
 
-VARIANT="$(basename "$VARIANT_DIR")"                     # e.g. physics
-EVAL_DIR="$(dirname "$VARIANT_DIR")"                     # e.g. .../standalone/evaluation
+# Run from the repo root so `python -m evaluation.*` and `simstack` resolve.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
+
+# Prefer the repo venv so subprocess calls (vllm bench serve via sys.executable)
+# use the same Python that has vllm installed from source.
+PYTHON="${PYTHON:-}"
+if [ -z "$PYTHON" ]; then
+  if [ -x ".venv/bin/python" ]; then
+    PYTHON=".venv/bin/python"
+  else
+    PYTHON="python"
+  fi
+fi
+
+OUT="${OUT:-$REPO_ROOT/evaluation/results/$STACK/$VARIANT}"
+
+if [ "$CMD" = "promote" ]; then
+  echo "== promote (tuned beta → calibrations/) =="
+  exec "$PYTHON" -m simstack promote "$STACK_DIR" --tuned "$OUT/tuned-sim-config.json"
+fi
+
+EVAL_MANIFESTS="$REPO_ROOT/.build/$STACK/$VARIANT"
+"$PYTHON" -m simstack render "$STACK_DIR" --eval "$VARIANT" --out "$EVAL_MANIFESTS"
 
 # Extract a resource's metadata.name from a single-document manifest.
 res_name() {  # <kind> <file>
@@ -99,12 +115,11 @@ fi
 REAL_PORT="${REAL_PORT:-9001}"
 SIM_PORT="${SIM_PORT:-9002}"
 SIM_TUNER_PORT="${SIM_TUNER_PORT:-9003}"
-OUT="${OUT:-$EVAL_DIR/results/$VARIANT}"
-MODEL_CONFIG="${MODEL_CONFIG:-$VARIANT_DIR/configmap.yaml}"
-SIM_CONFIG="${SIM_CONFIG:-$VARIANT_DIR/sim-config.json}"
-SWEEP="${SWEEP:-$EVAL_DIR/sweep.yaml}"
+MODEL_CONFIG="${MODEL_CONFIG:-$EVAL_MANIFESTS/configmap.yaml}"
+SIM_CONFIG="${SIM_CONFIG:-$EVAL_MANIFESTS/sim-config.json}"
+SWEEP="${SWEEP:-$STACK_DIR/sweep.yaml}"
+TOKENIZER="${TOKENIZER:-$("$PYTHON" -c 'import sys; from simstack.catalog import Stack, load_model; print(load_model(Stack.load(sys.argv[1]).model)[0]["hf_id"])' "$STACK_DIR")}"
 KUBECTL="${KUBECTL:-oc}"
-PYTHON="${PYTHON:-}"
 SETUP_TIMEOUT="${SETUP_TIMEOUT:-900s}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-120}"
 
@@ -122,26 +137,12 @@ if [ "$_missing" = "1" ]; then
   exit 2
 fi
 
-# Run from the repo root so `python -m evaluation.*` resolves.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-cd "$REPO_ROOT"
-
-# Prefer the repo venv so subprocess calls (vllm bench serve via sys.executable)
-# use the same Python that has vllm installed from source.
-if [ -z "$PYTHON" ]; then
-  if [ -x ".venv/bin/python" ]; then
-    PYTHON=".venv/bin/python"
-  else
-    PYTHON="python"
-  fi
-fi
-
 ns_flag=()
 [ -n "$NAMESPACE" ] && ns_flag=(-n "$NAMESPACE")
-kc() { "$KUBECTL" "${ns_flag[@]}" "$@"; }
+kc() { "$KUBECTL" ${ns_flag[@]+"${ns_flag[@]}"} "$@"; }
 
 echo "command:  $CMD"
+echo "stack:    $STACK"
 echo "variant:  $VARIANT"
 if [ "$PD_MODE" = "1" ]; then
   echo "mode:     P/D disaggregated"
@@ -253,16 +254,10 @@ do_run() {
   "$PYTHON" -m evaluation.run_eval eval \
     --real-url "http://127.0.0.1:$REAL_PORT" \
     --sim-url "http://127.0.0.1:$SIM_PORT" \
+    --tokenizer "$TOKENIZER" \
     --out "$OUT" \
-    "${sweep_flag[@]}" \
-    "${model_config_flag[@]}"
-}
-
-do_promote() {
-  echo "== promote (tuned beta → k8s config) =="
-  "$PYTHON" -m evaluation.run_eval promote \
-    --deployment-dir "$(dirname "$EVAL_DIR")" \
-    --latency-model "$VARIANT"
+    ${sweep_flag[@]+"${sweep_flag[@]}"} \
+    ${model_config_flag[@]+"${model_config_flag[@]}"}
 }
 
 do_tune() {
@@ -289,14 +284,14 @@ do_tune() {
     --real-url "http://127.0.0.1:$REAL_PORT" \
     --sim-url "http://127.0.0.1:$SIM_PORT" \
     --model-config "$SIM_CONFIG" \
+    --tokenizer "$TOKENIZER" \
     --out "$OUT" \
-    "${tuner_url_flag[@]}"
+    ${tuner_url_flag[@]+"${tuner_url_flag[@]}"}
 }
 
 case "$CMD" in
   setup)    do_setup ;;
   run)      do_run ;;
-  promote)  do_promote ;;
   teardown) do_teardown all ;;
   all)      do_setup; do_run;  teardown_or_keep ;;
   tune)     do_setup; do_tune; teardown_or_keep ;;

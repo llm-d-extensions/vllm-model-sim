@@ -1,45 +1,51 @@
 ---
 name: add-model
-description: Add a new model to vllm-model-sim under models/<slug>/ with default, untuned physics latency values (beta = [1.0, 1.0, 0.0]) and a deployable standalone Kubernetes stack, plus the READMEs and inventory tables. Use whenever someone wants to simulate, support, onboard or "add" a HuggingFace model (Llama, Qwen, Mistral, Mixtral, Gemma, gpt-oss, an FP8 checkpoint, ...) or a new GPU target for an existing model, even if they only give an HF id and say "can we sim this". Not for tuning or calibrating betas, or for running real-vs-sim evaluations; those go through evaluation/eval.sh.
+description: Add a new model to vllm-model-sim (catalog/models/<slug>/ plus a deploy/<stack>/ standalone stack) with default, untuned physics latency values (beta = [1.0, 1.0, 0.0]) and a rendered Kubernetes stack, plus the READMEs and inventory tables. Use whenever someone wants to simulate, support, onboard or "add" a HuggingFace model (Llama, Qwen, Mistral, Mixtral, Gemma, gpt-oss, an FP8 checkpoint, ...) or a new GPU target for an existing model, even if they only give an HF id and say "can we sim this". Not for tuning or calibrating betas, or for running real-vs-sim evaluations; those go through evaluation/eval.sh.
 ---
 
 # Add a model with default latency values
 
-The result is a new `models/<slug>/` tree whose standalone `k8s/` stack runs
+The result is a catalog entry, `catalog/models/<slug>/`, and a standalone
+stack, `deploy/<slug>-<hw>-standalone[-tp<n>]/`, whose rendered `k8s/` runs
 the **physics roofline model with unit betas** `[1.0, 1.0, 0.0]`, with no
-tuning. That is the repo's documented uncalibrated baseline (the
-`physics-beta-1.0` variant for Qwen3-32B): prefill and decode times are the
-pure compute/bandwidth roofline for the model's shapes on the target GPU, with
-no fixed per-step overhead. It is a reasonable first approximation but sits
-below real latency, most visibly for small or sparse models at low batch.
-Calibration happens later with `eval.sh tune` and is out of scope here.
+tuning. Unit betas are what the renderer falls back to when
+`calibrations/<slug>/<hw>.yaml` has no matching record, so nothing needs
+writing there. Prefill and decode times are the pure compute/bandwidth
+roofline for the model's shapes on the target GPU, with no fixed per-step
+overhead. It is a reasonable first approximation but sits below real latency,
+most visibly for small or sparse models at low batch. Calibration happens
+later with `eval.sh tune` and is out of scope here.
 
-All paths below are relative to the repo root.
+Read [deploy/README.md](../../../deploy/README.md) for the layout. All paths
+below are relative to the repo root.
 
 ## 1. Gather inputs
 
 | Input | Default | Notes |
 |-------|---------|-------|
 | HF model id | — (required) | e.g. `Qwen/Qwen3-8B`. Also used as `--tokenizer`. |
-| slug | lower-case HF name, `.` → `-` | Directory name and Kubernetes resource-name stem, so only `[a-z0-9-]` (the script rejects anything else). `Llama-3.1-8B-Instruct` → `llama-3-1-8b-instruct`. Keep the quantization in it (`-fp8`) if the checkpoint is quantized. |
+| slug | lower-case HF name, `.` → `-` | Catalog name and Kubernetes resource-name stem, so only `[a-z0-9-]` (the script rejects anything else). `Llama-3.1-8B-Instruct` → `llama-3-1-8b-instruct`. Keep the quantization in it (`-fp8`) if the checkpoint is quantized. |
 | served model name | slug | `--served-model-name`, the `"model"` clients send. Pass `--served-model-name` to keep dots (`llama-3.1-8b-instruct`). |
-| hardware slug | `h100-sxm5` | See `references/hardware.md` for specs and slugs. |
+| hardware slug | `h100-sxm5` | A file under `catalog/hardware/`. For a GPU not there, see `references/hardware.md`. |
 | TP | 1 | Pick the smallest TP the real model fits in (weights + KV cache under the GPU's memory). |
 
 If the user gave only a model id, use the defaults and say so. Don't stop to
 ask unless the hardware choice matters to them and is truly ambiguous.
 
-If `models/<slug>/` already exists, the request is probably a new hardware
-target for an existing model. Skip `config.json` (the script refuses to
-overwrite without `--force`; use a scratch `--root` and copy only the
-`deployments/<hw>/` subtree).
+If `catalog/models/<slug>/` already exists, the request is probably a new
+hardware target or topology for an existing model. Then you only need a new
+`deploy/<stack>/stack.yaml` and `sweep.yaml`, followed by
+`python -m simstack render deploy/<stack>`; skip step 2.
 
 ## 2. Scaffold the mechanical files
 
 ```bash
-python3 .claude/skills/add-model/scripts/scaffold_model.py \
+.venv/bin/python .claude/skills/add-model/scripts/scaffold_model.py \
   --model <HF-id> --slug <slug> --hardware <hw> --tp <n>
 ```
+
+The script needs PyYAML (it renders with `simstack`). Any Python with
+`pyyaml` installed works.
 
 `--model` also accepts a local `config.json` path (add `--hf-id <HF-id>`).
 Use a local path when the direct download fails, e.g. on gated repos or
@@ -61,30 +67,38 @@ and `torch_dtype`, plus for MoE `num_experts`, `num_experts_per_tok`,
 Keep `rope_scaling`/`rope_theta` too, since vLLM validates them against
 `max_position_embeddings`.
 
+For a GPU without a `catalog/hardware/<hw>.yaml`, also pass `--peak-tflops`,
+`--hbm-gbps`, `--memory-gib` and `--gpu-product` (the `nvidia.com/gpu.product`
+node label). The script then writes the hardware file, deriving vLLM's
+scheduler defaults from the memory size.
+
 The script writes:
 
 ```
-models/<slug>/config.json                                  real config, cleaned
-models/<slug>/deployments/<hw>/standalone/k8s/
-  sim-config.json   real config + architectures=[SimulatedForCausalLM] + latency block
-  configmap.yaml    ConfigMap embedding sim-config.json
-  deployment.yaml   CPU sim Deployment (vllm-openai-cpu + plugin init container)
-  service.yaml      ClusterIP Service
-  pvc.yaml          shared hf-cache PVC
+catalog/models/<slug>/config.json   real config, cleaned
+catalog/models/<slug>/model.yaml    hf_id, served_model_name, weight_dtype
+deploy/<stack>/stack.yaml           model, hardware, topology: standalone, tp, profile
+deploy/<stack>/sweep.yaml           copy of evaluation/sweep.yaml
+deploy/<stack>/k8s/                 rendered: configmap.yaml, sim-config.json,
+                                    deployment.yaml, service.yaml, pvc.yaml
 ```
 
 It also prints a JSON summary. Read it, because the rest of the job depends
 on it:
 
-- `resource_name`: `vllm-<slug>-standalone-<hash>`. The hash is the first 6
-  hex chars of `sha256(json.dumps(sim_config, sort_keys=True))`, the same
-  scheme the existing manifests use. If you hand-edit `sim-config.json`
-  afterwards, the hash and every name containing it go stale, so regenerate
-  with `--force` instead.
+- `resource_name`: `vllm-<slug>-standalone[-tp<n>]-<hash>`. The hash is the
+  first 6 hex chars of `sha256(json.dumps(sim_config, sort_keys=True))`.
+  Never hand-edit `k8s/`. Change the catalog, profile or calibrations and
+  re-render with `python -m simstack render deploy/<stack>`;
+  `tests/test_simstack.py` fails on stale renders.
+- `engine`: the `--max-model-len`, `--max-num-batched-tokens` and
+  `--max-num-seqs` both the sim and the real pods get. They come from the
+  GPU's `vllm_defaults` and the profile, and `max-model-len` is capped at
+  `max_position_embeddings`.
 - `warnings`: architecture features the physics model does not represent
   (MLA, sliding-window or hybrid/linear attention, multimodal towers, MoE
-  sparse-step quirks). Don't hide them. Put each one in the deployment
-  README's Limitations section so readers know how far to trust the numbers.
+  sparse-step quirks). Don't hide them. Put each one in the stack README's
+  Limitations section so readers know how far to trust the numbers.
 
 What the script does to the real config, and why:
 - Hoists decoder fields out of `text_config` for multimodal wrappers, because
@@ -93,24 +107,22 @@ What the script does to the real config, and why:
   physics model reads.
 - Drops `quantization_config`, `auto_map` and `compression_config`. With
   dummy weights the sim can't run quantized kernels or remote code. FP8 and
-  INT8 checkpoints get `weight_dtype: float8` or `int8` in the latency
-  block instead, so decode still reads the right number of weight bytes.
-- Sets `--max-model-len` to 16384, as the Qwen3-32B Deployment does, or to
-  `max_position_embeddings` if that is smaller. The CPU pod reserves only
-  4 GiB of KV cache (`VLLM_CPU_KVCACHE_SPACE`). If the user needs longer
-  contexts, pass `--max-model-len` and raise that variable with it.
-- Never writes `tp` into the latency block. The plugin injects it from
-  `--tensor-parallel-size` at load time; the script adds that flag to the
-  Deployment when `--tp > 1` and scales CPU/memory requests by TP.
+  INT8 checkpoints get `weight_dtype: float8` or `int8` in `model.yaml`
+  instead, so decode still reads the right number of weight bytes.
 
-Pass `--beta PF DC BASE_MS` only if the user explicitly supplies betas. The
+The CPU pod reserves only 4 GiB of KV cache (`sim.kv_cache_space_gib` in
+`profiles/default.yaml`). If the user needs longer contexts, add a profile
+with a larger `engine.max_model_len` and KV space and name it in `stack.yaml`.
+
+Pass `--beta PF DC BASE_MS` only if the user explicitly supplies betas; it
+appends a `method: assumed` record to `calibrations/<slug>/<hw>.yaml`. The
 point of this skill is the untuned default.
 
 ## 3. Sanity-check the default latencies
 
 ```bash
 python3 .claude/skills/add-model/scripts/estimate_latency.py \
-  models/<slug>/deployments/<hw>/standalone/k8s/sim-config.json --tp <n>
+  deploy/<stack>/k8s/sim-config.json --tp <n>
 ```
 
 This prints prefill times and decode step times (ITL) from the plugin's own
@@ -119,62 +131,50 @@ bound, `active_param_bytes / tp / hbm_bandwidth`. A dense 8B BF16 model on
 H100 gives about 16 GB / 3350 GB/s ≈ 5 ms. The script reports 4.2 ms for
 Qwen3-8B, a bit lower because the physics model leaves out the embedding
 and LM-head weights. An order-of-magnitude miss means a config field was
-misread, usually `head_dim`, the MoE fields or `text_config`. Put the batch-1 ITL and the 1k-token prefill time in the
-deployment README.
+misread, usually `head_dim`, the MoE fields or `text_config`. Put the batch-1
+ITL and the 1k-token prefill time in the stack README.
 
 ## 4. Write the READMEs and update inventories
 
-Use the Qwen3-32B tree as the model. Match its structure and tone, not its
-content:
+Use the Qwen3-32B files as the model. Match their structure and tone, not
+their content:
 
 | New file | Model on |
 |----------|----------|
-| `models/<slug>/README.md` | `models/qwen3-32b/README.md` (HF id, architecture, params, max context, dtype, deployments table) |
-| `models/<slug>/deployments/README.md` | `models/qwen3-32b/deployments/README.md` |
-| `models/<slug>/deployments/<hw>/README.md` | `models/qwen3-32b/deployments/h100-sxm5/README.md` (hardware table, configurations table) |
-| `models/<slug>/deployments/<hw>/standalone/README.md` | `models/qwen3-32b/deployments/h100-sxm5/standalone/README.md` |
+| `catalog/models/<slug>/README.md` | `catalog/models/qwen3-32b/README.md` (HF id, architecture, params, max context, dtype, stacks table) |
+| `deploy/<stack>/README.md` | `deploy/qwen3-32b-h100-sxm5-standalone/README.md` |
 
-The standalone README differs from Qwen3-32B's in these ways, so don't copy
-those parts:
+The stack README differs from Qwen3-32B's in these ways, so don't copy those
+parts:
 - Say that `k8s/` runs the **untuned** physics model, β = [1.0, 1.0, 0.0],
-  and give the step-3 estimates. Qwen3-32B's `k8s/` is calibrated; the new
-  model's is not yet.
-- Use the real `resource_name` from the script summary in the
-  `kubectl port-forward` command, the served model name as the `"model"` in the
-  `/v1/chat/completions` curl example, and `<HF-id>` as the local run's
-  `--tokenizer`.
-- For the local run, use the model-directory form from step 5, not the
-  `VLLM_SIMULATED_PLUGIN_CONFIG=... vllm serve <HF-id>` form in the Qwen3-32B
-  README. The plugin never reads that variable, so serving the HF id loads
-  the real architecture with dummy weights instead of the simulator.
+  and give the step-3 estimates.
+- Use the served model name as the `"model"` in the `/v1/chat/completions`
+  curl example, `<HF-id>` as the local run's `--tokenizer`, and the summary's
+  `engine` values as the local run's engine flags.
 - If the HF repo is gated, the pod downloads the tokenizer at startup and
   fails without a token, because the Deployment marks the `hf-token` Secret
   optional. Add a step:
   `kubectl create secret generic hf-token --from-literal=token=$HF_TOKEN`.
 - Include a Limitations section only if the script printed warnings or the
   config was hand-written.
-- There is no `evaluation/` tree yet, so leave out
-  the Latency Models, Eval Results and Eval sections. Add a short "Next
-  steps" note instead: an evaluation and `eval.sh tune` will produce
-  calibrated betas.
+- Keep the Eval section short: `eval.sh deploy/<stack>` and `eval.sh tune`
+  will produce calibrated betas, but no report exists yet.
 
 Then update the inventories:
-- `models/README.md`: add a row to the **Models** table, and to **Hardware
-  Slugs** if the GPU is new.
-- `README.md` (repo root): add a row to **Supported Models** for the
-  standalone deployment, with the mode written as `Standalone (untuned)`.
-  The Quick Start calls the listed deployments "production-calibrated", and
-  the label keeps readers from assuming this one is.
+- `deploy/README.md`: add a row to the **Stacks** table, with calibration
+  `none (unit betas)`.
+- `README.md` (repo root): add a row to **Supported Models**, with the mode
+  written as `Standalone (untuned)`. The Quick Start calls the listed
+  deployments "calibrated", and the label keeps readers from assuming this one
+  is.
 
 ## 5. Verify
 
 ```bash
-python3 -c 'import json,sys; [json.load(open(p)) for p in sys.argv[1:]]' \
-  models/<slug>/config.json models/<slug>/deployments/<hw>/standalone/k8s/sim-config.json
-grep -rn "qwen3-32b\|Qwen3-32B\|eae748" models/<slug>/   # should print nothing
-python3 -c 'import yaml' 2>/dev/null && python3 -c 'import sys,yaml; [list(yaml.safe_load_all(open(p))) for p in sys.argv[1:]]' \
-  models/<slug>/deployments/<hw>/standalone/k8s/*.yaml    # skip if PyYAML is missing
-source .venv/bin/activate && pytest tests/              # if a venv exists
+.venv/bin/python -m simstack check                     # renders are fresh
+.venv/bin/python -m simstack resolve deploy/<stack>    # unit betas, method: assumed
+grep -rn "qwen3-32b\|Qwen3-32B" catalog/models/<slug>/ deploy/<stack>/   # should print nothing
+source .venv/bin/activate && pytest tests/test_simstack.py   # if a venv exists
 ```
 
 If a venv with vLLM exists, a local smoke run proves vLLM accepts the config.
@@ -184,9 +184,9 @@ Kubernetes Deployment does by mounting the ConfigMap at `/model`:
 
 ```bash
 mkdir -p "$TMPDIR/<slug>-sim"
-cp models/<slug>/deployments/<hw>/standalone/k8s/sim-config.json "$TMPDIR/<slug>-sim/config.json"
+cp deploy/<stack>/k8s/sim-config.json "$TMPDIR/<slug>-sim/config.json"
 vllm serve "$TMPDIR/<slug>-sim" --tokenizer <HF-id> --served-model-name <served-name> \
-  --load-format dummy --max-model-len 16384 --port 8000
+  --load-format dummy --max-model-len <engine.max_model_len> --port 8000
 ```
 
 followed by a `/v1/chat/completions` request. Skip it when there's no vLLM
@@ -194,8 +194,8 @@ install and say it wasn't run. Don't claim it passed.
 
 ## Out of scope
 
-- `evaluation/` variants (`flat`, `physics`, `physics-beta-1.0`), real-GPU
-  manifests, `sweep.yaml`, and tuning: see `evaluation/README.md`.
-- P/D (`pd/`) stacks. Once standalone exists, copy
-  `models/qwen3-32b/deployments/h100-sxm5/pd/k8s/` and substitute the names,
-  but only if the user asks.
+- Real-vs-sim evaluation and tuning: see `evaluation/README.md`. The real GPU
+  manifests are rendered on the fly by `eval.sh`, so there's nothing to write
+  for them here.
+- P/D stacks. Once standalone exists, add `deploy/<slug>-<hw>-pd/stack.yaml`
+  with `topology: pd` and render it, but only if the user asks.

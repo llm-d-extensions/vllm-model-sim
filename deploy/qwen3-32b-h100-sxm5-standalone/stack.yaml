@@ -1,0 +1,5 @@
+model: qwen3-32b
+hardware: h100-sxm5
+topology: standalone
+tp: 1
+profile: default

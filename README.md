@@ -20,20 +20,25 @@ is replaced with a bandwidth-based latency model — no real RDMA transfers occu
 
 ## Quick Start
 
-Production-calibrated deployments (Kubernetes and local CPU, including macOS)
-are available for the models listed below. Each deployment directory includes:
-- **k8s/** — production manifests (ConfigMap, Deployment, Service)
-- **evaluation/** — latency model variants (`physics`, `flat`, `physics-beta-1.0`)
-- **README.md** — full deployment instructions with prerequisites
+Calibrated deployments (Kubernetes and local CPU, including macOS) are
+available for the models listed below. Each stack directory under `deploy/`
+includes:
+- **k8s/**: rendered Kubernetes manifests (ConfigMap, Deployment, Service)
+- **sweep.yaml**: the benchmark matrix for real-vs-sim evaluation
+- **README.md**: full deployment instructions with prerequisites
 
-See [Supported Models](#supported-models) for the complete list.
+The manifests are rendered by `python -m simstack` from the hardware and model
+catalog, an engine profile and fitted calibration records; see
+[deploy/README.md](deploy/README.md) for the layout. See
+[Supported Models](#supported-models) for the complete list.
 
 ## Supported Models
 
-| Model | Hardware | Deployment Modes | Directory |
-|-------|----------|------------------|-----------|
-| Qwen3-32B | H100 SXM5 | Standalone | [models/qwen3-32b/deployments/h100-sxm5/standalone](models/qwen3-32b/deployments/h100-sxm5/standalone/) |
-| Qwen3-32B | H100 SXM5 | Prefill/Decode Disaggregation | [models/qwen3-32b/deployments/h100-sxm5/pd](models/qwen3-32b/deployments/h100-sxm5/pd/) |
+| Model | Hardware | Deployment Mode | TP | Stack |
+|-------|----------|-----------------|----|-------|
+| Qwen3-32B | H100 SXM5 | Standalone | 1 | [deploy/qwen3-32b-h100-sxm5-standalone](deploy/qwen3-32b-h100-sxm5-standalone/) |
+| Qwen3-32B | H100 SXM5 | Prefill/Decode Disaggregation | 1 | [deploy/qwen3-32b-h100-sxm5-pd](deploy/qwen3-32b-h100-sxm5-pd/) |
+| Qwen3-32B | H100 SXM5 | Prefill/Decode Disaggregation | 2 | [deploy/qwen3-32b-h100-sxm5-pd-tp2](deploy/qwen3-32b-h100-sxm5-pd-tp2/) |
 
 ## Latency models
 
@@ -47,8 +52,7 @@ Any `latency` block can be overridden at launch with `--hf-overrides`.
 > every key you want set:
 > 
 > ```bash
-> VLLM_SIMULATED_PLUGIN_CONFIG=/path/to/sim-config.json \
-> vllm serve <model-id> --load-format dummy \
+> vllm serve /path/to/sim-model-dir --load-format dummy \
 >   --hf-overrides '{"latency": {"type": "linear", "base_ms": 5.0, ...}}'
 > ```
 

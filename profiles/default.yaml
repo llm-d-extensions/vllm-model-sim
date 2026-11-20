@@ -1,0 +1,24 @@
+# Engine settings shared by the real and the sim pods, plus images and pod
+# sizing. A stack names its profile in stack.yaml.
+engine:
+  max_model_len: 8192
+  # max_num_batched_tokens / max_num_seqs default to the hardware's
+  # vllm_defaults; set them here to override for every stack using this profile.
+real:
+  image: vllm/vllm-openai:latest
+  gpu_memory_utilization: 0.9
+  memory_gib_per_gpu: 32
+  hf_cache_gib: 80
+sim:
+  image: vllm/vllm-openai-cpu:v0.27.0-x86_64
+  deps_image: ghcr.io/llm-d-extensions/vllm-sim-deps:v0.3.0
+  gpu_memory_utilization: 0.5
+  kv_cache_space_gib: 4
+  cpus_per_rank: 4
+  memory_gib_per_rank: 8
+  # Shared HuggingFace cache PVC used by the standalone stack.
+  hf_cache_storage_class: ibm-spectrum-scale-fileset
+sidecar:
+  image: ghcr.io/llm-d/llm-d-router-disagg-sidecar:latest
+benchmark:
+  image: vllm/vllm-openai-cpu:latest-x86_64
